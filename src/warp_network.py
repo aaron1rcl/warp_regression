@@ -5,34 +5,44 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.distributions.normal import Normal
-import src.linear_basis as linear_basis
-import src.warp as warp
-from src.warp_layer import WarpLayer
-from src.shift_rows import shift_rows
-from src.nan_mean import NanMean
 import matplotlib.pyplot as plt
 
 class PerturbationNetwork(nn.Module):
-    def __init__(self, n, hidden_size, t):
+    def __init__(self, n_knots, t):
         super(PerturbationNetwork, self).__init__()
-        self.warp = nn.Linear(1, hidden_size, bias=False)
-        self.p_out = nn.Linear(hidden_size, 1, bias=False)
-        self.relu = nn.ReLU()
+        self.warp = nn.Parameter(n_knots)
+        self.t = t
+        self.n_knots = 5
+        self.knots = torch.linspace(0, t, steps=n_knots)
+        self.X = self.basix_matrix()
+        self.rw_interval = torch.diff(self.k_values)[0].item()
 
-  
-    def forward(self, x):
-        # Create the perturbation profile
-        p_i = self.relu(self.warp(x))
-        p_i = self.p_out(p_i)
+    def basix_matrix(self):
+        x = torch.arange(1, self.t + 1)  # Sample x values
+        self.k_values = np.arange(0, self.n_knots) * (self.t / self.n_knots)  # Values of k
+        X = self.create_basis(x, self.k_values)
+        return X/torch.max(X)
 
-        # Rescale
-        p_scale = p_i*p_i.shape[0]
+    def piecewise_linear(x, k):
+        y = x - k
+        y[x < 0] = 0
+        y[x < k] = 0
+        return y
 
-        return p_scale
+    def create_basis(self, x, k):
+      num_x = len(x)
+      num_k = len(k)
+      b = torch.zeros((num_x, num_k))
+      for i in range(num_k):
+          b_i = self.piecewise_linear(x, k[i])
+          b[:, i] = b_i
+      return b
+
+    def forward(self):
+        # Create the perturbation profile and return
+        p = np.dot(self.X, self.B)
+        return p
     
-
-    
-
 class ShiftNetwork(nn.Module):
     def __init__(self, n, hidden_size, t):
         super(ShiftNetwork, self).__init__()
@@ -85,13 +95,77 @@ class ShiftNetwork(nn.Module):
         output = torch.where(col_count > 0, col_sum / col_count, torch.tensor(float('nan')))
         
         return output
+
+    def fill_nan_with_last_value(x):
+        mask = torch.isnan(x)
+
+        last = x[0].item()
+        for i in range(1, x.shape[0]):
+            if mask[i].item():
+                x[i] = last
+            elif mask[i].item() is False:
+                last = x[i].item()
+        return x
+
+    def conditional_posterior(d, u, sd, n_steps):
+        ''' Posterior Conditional conditional on f(X | Xn = d) Distribution
+        Multivariate gaussian distribution'''
+        u = (d / n_steps)
+        sd = torch.sqrt((sd ** 2) * (n_steps - 1) / n_steps)
+        return u, sd
+
+    def px_z(u1, u2, sd1, sd2):
+        ''' Find the pdf of Z ~N(u2, sd2**2), given the parameters of X ~ (u1, sd1**2) '''
+
+        # Define the constants
+        alpha = torch.sqrt(1 / (2 * sd2**2) + 1 / (2 * sd1**2))
+        alpha_beta = u2 / (2 * sd2**2) + u1 / (2 * sd1**2)
+        gamma = (u2**2) / (2 * sd2**2) + (u1**2) / (2 * sd1**2)
+        beta = alpha_beta / alpha
+
+        # Define the components
+        p1 = 1 / (2 * sd1 * sd2 * alpha * torch.sqrt(torch.tensor(np.pi)))
+        p2 = torch.exp(-gamma + beta**2)
+
+        return p1 * p2
+
+    def reverse_softplus(x):
+        return -torch.log(1 + torch.exp(-x))
+
+    def expected_likelihood(self, d, u, sd, n_steps):
+        ''' Analytical Solution to the Expected Likelihood
+        Given a random walk what is the expected likelihood
+        of the walk, given that it took n_steps and moved a vertical distance d'''
+        post_u, post_sd = self.conditional_posteriorposterior(d, u, sd, n_steps)
+        el = torch.log(self.px_z(u1=torch.tensor(0.0), u2=post_u, sd1=sd, sd2=post_sd))
+        # Apply a reversed softplus so that the values are bounded to P=1
+        el = self.reverse_softplus(el * n_steps)
+        return el
+
+    def terror_likelihood(self, k_values, sd, RW_width, p):
+        ''' Calculate the likelihood across on the time axis 
+        The returned value comprises the expected likelihood, calculated
+        between each of the k knot values'''
+        total_likelihood = torch.tensor(0.0)
+        for i in range(1, len(k_values)):
+          x1 = k_values[i]
+          x2 = k_values[i-1]
+
+          y1 = p[x1]
+          y2 = p[x2]
+
+          d = y2 - y1
+
+          el = self.expected_likelihood(d, 0, sd, RW_width)
+          total_likelihood =+ el
+        return total_likelihood
     
     def forward(self, X, p):
 
         x_shift = self.shift_rows(X, p)
         x_shift  = self.nan_mean(x_shift)
 
-        x_shift = warp.fill_nan_with_last_value(x_shift.squeeze(0))
+        x_shift = self.fill_nan_with_last_value(x_shift.squeeze(0))
         x_shift = x_shift[::self.sr]
         x_shift = x_shift[:len(p)]
         x_shift = x_shift.unsqueeze(1)
@@ -102,28 +176,18 @@ class ShiftNetwork(nn.Module):
         y = self.fc4(h3)
         return y.squeeze(1)
     
-    def log_likelihood(self, y_pred, y, p):
+    def log_likelihood(self, y_pred, y, p, k_values, rw_interval):
         
         # Compute log likelihood of data given model parameters
         sigma = torch.exp(self.sigma)
         sigma_t = torch.exp(self.sigma_t)
         dist = Normal(loc=0, scale=sigma)
         ll = dist.log_prob(y_pred-y).sum()
-        #print(p)
-
  
-        #print(torch.diff(p, dim=0))
-
-        p_diff = torch.diff(p, dim=0)
+        tl = self.terror_likelihood(k_values, sigma_t, rw_interval, p)
     
-        #print(p_diff)
-        dist2 = Normal(loc=0, scale=sigma_t)
-        tl = dist2.log_prob(p_diff.squeeze(0)).sum()
-
-        print(ll)
-        print(tl)
-
-        return -ll - tl
+        # Maximize therefore multiply by -1
+        return -(ll + tl)
     
 
     
