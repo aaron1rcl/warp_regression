@@ -2,10 +2,6 @@ import torch
 import torch.nn as nn
 from torch.distributions.normal import Normal
 import numpy as np
-import torch
-import torch.nn as nn
-from torch.distributions.normal import Normal
-import matplotlib.pyplot as plt
 
 class PerturbationNetwork(nn.Module):
     def __init__(self, n_knots, t):
