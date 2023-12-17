@@ -129,22 +129,23 @@ class ShiftNetwork(nn.Module):
         return el
 
     def terror_likelihood(self, k_values, sd, RW_width, p):
-        ''' Calculate the likelihood across on the time axis
-        The returned value comprises the expected likelihood, calculated
-        between each of the k knot values'''
-        total_likelihood = 0
-        for i in range(1, len(k_values)):
-          x1 = k_values[i-1]
-          x2 = k_values[i]
+            ''' Calculate the likelihood across on the time axis
+            The returned value comprises the expected likelihood, calculated
+            between each of the k knot values'''
+            total_likelihood = 0
+            k_values = torch.cat([k_values, torch.tensor(len(p)).unsqueeze(0) - 1])
+            for i in range(1, len(k_values)):
+              x1 = k_values[i-1]
+              x2 = k_values[i]
 
-          y1 = p[x1.to(torch.int)]
-          y2 = p[x2.to(torch.int)]
+              y1 = p[x1.to(torch.int)]
+              y2 = p[x2.to(torch.int)]
 
-          d = y2 - y1
+              d = y2 - y1
 
-          el = self.expected_likelihood(d, 0, sd, RW_width)
-          total_likelihood = total_likelihood + el
-        return total_likelihood
+              el = self.expected_likelihood(d, 0, sd, RW_width)
+              total_likelihood = total_likelihood + el
+            return total_likelihood
 
     def forward(self, X, basis_X):
 
@@ -164,6 +165,36 @@ class ShiftNetwork(nn.Module):
         h3 = self.relu(self.fc3(h2))
         y = self.fc4(h3)
         return y.squeeze(1), p
+
+    def predict_realisations(self,X,n):
+        realisations = []
+        for i in range(n):
+          y = self.predict(X, True).detach().numpy()
+          realisations.append(y)
+        return realisations
+
+    def predict(self, X, rw_realisation=False):
+        if rw_realisation is False:
+          # Predict without any time shifting
+          p = torch.matmul(basis_X, torch.tensor(torch.zeros(self.B.shape[0])))
+        else:
+          rw = np.cumsum(np.random.normal(0, np.exp(self.sigma_t.detach().numpy())*self.sr,size=X.shape[0]), axis=0)
+          p = rw[::model.sr]
+
+        x_shift = self.shift_rows(X, p)
+        x_shift  = self.nan_mean(x_shift)
+        x_shift = self.fill_nan_with_last_value(x_shift.squeeze(0))
+        x_shift[0] = X[0,0]
+
+        x_shift = x_shift[::self.sr]
+        x_shift = x_shift[:len(p)]
+        x_shift = x_shift.unsqueeze(1)
+
+        h1 = self.relu(self.fc1(x_shift))
+        h2 = self.relu(self.fc2(h1))
+        h3 = self.relu(self.fc3(h2))
+        y = self.fc4(h3)
+        return y.squeeze(1)
 
     def log_likelihood(self, y_pred, y, p):
 
