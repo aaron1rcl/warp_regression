@@ -2,15 +2,23 @@ import torch
 import torch.nn as nn
 from torch.distributions.normal import Normal
 import numpy as np
+from patsy import dmatrix
 
 
 class ShiftNetwork(nn.Module):
-    def __init__(self, n, hidden_size, t, n_knots):
+    def __init__(self, n, hidden_size, t, n_knots, opt_max=False):
         super(ShiftNetwork, self).__init__()
+
+        # Settings
         self.n = n
         self.hidden_size = hidden_size
         self.n_knots = n_knots
         self.t = t
+        self.sr = 10
+        self.scale_factor=0.02
+        self.opt_max = opt_max
+
+        # Trainable Parameters 
         self.B = nn.Parameter(torch.randn(n_knots))
 
         self.fc1 = nn.Linear(n, hidden_size)
@@ -19,10 +27,12 @@ class ShiftNetwork(nn.Module):
         self.fc4 = nn.Linear(hidden_size, 1)
         self.relu = nn.ReLU()
 
-        self.sr = 10
-
+        # Utility Parameters  (likelihood)
         self.sigma = nn.Parameter(torch.zeros(1))
         self.sigma_t = nn.Parameter(torch.zeros(1))
+
+    def set_opt_max(self, is_max):
+        self.opt_max = is_max
 
     def basis_matrix(self):
         x = torch.arange(1, self.t + 1)  # Sample x values
@@ -30,6 +40,14 @@ class ShiftNetwork(nn.Module):
         self.rw_interval = torch.diff(self.k_values)[0].item()
         X = self.create_basis(x, self.k_values)
         return X
+
+    def fe_basis_matrix(self):
+        ''' Alternate linear basis with 'hat' type basis'''
+        x = np.arange(1, self.t + 1)
+        y = dmatrix(f"bs(x, df={self.n_knots}, degree=1, include_intercept=False) - 1", {"x": x})
+        self.k_values = torch.arange(0, self.n_knots) * (self.t / self.n_knots)
+        self.rw_interval = torch.diff(self.k_values)[0].item()
+        return torch.tensor(np.array(y), dtype=torch.float32)
 
     def piecewise_linear(self, x, k):
         y = x - k
@@ -67,7 +85,9 @@ class ShiftNetwork(nn.Module):
     def create_shift_matrix(self, p, n_max, tau=10, clamp_max=1000, pad=False):
         pp = p + torch.arange(p.shape[0]).unsqueeze(1)
         POS = torch.tensor(np.arange(p.shape[0])).repeat(p.shape[0],1)
-
+        # Filter the empty rows
+        POS = POS[::self.sr,::]
+        pp = pp[::self.sr]
         # Iteratively multiply the matrix by itself, clamping each loop.
         power_ = (torch.abs(POS - pp) + 0.5)
         for i in range(tau):
@@ -85,7 +105,7 @@ class ShiftNetwork(nn.Module):
         # Create the shift matrix form
         P = self.create_shift_matrix(p_expand, n_max=p_expand.shape[0], tau=15, clamp_max=torch.tensor(1000), pad=False)
         # Replace zeros with NANs
-        P = P[::self.sr,:] 
+        #P = P[::self.sr,:] 
         # Expand the input x into the 2d shape
         B = x.view(-1, 1).expand(-1, p_expand.shape[0])
 
@@ -182,11 +202,9 @@ class ShiftNetwork(nn.Module):
 
         # shift parameters are dependent on the previous ones so they need scaling for the gradients
         # also clamp the B parameters before hand so they dont get so large.
-        B = torch.clamp(self.B, min=-3, max=3)
-        p = torch.matmul(basis_X, B )
-
-        plt.plot(p.detach().numpy())
-        plt.show()
+        #B = torch.clamp(self.B, min=-30, max=30)
+        p = torch.matmul(basis_X, self.B )
+        p = p/self.scale_factor
 
         # Shift across the rows, take the mean and forward fill.
         x_shift, P = self.shift_rows_differentiable(x, p)
@@ -214,26 +232,36 @@ class ShiftNetwork(nn.Module):
         y = self.fc4(h3)
         return y.squeeze(1), p
 
-    def predict_realisations(self,X,n):
+    def predict_realisations(self,x,n,rw_realisation=True):
         realisations = []
         for i in range(n):
-          y = self.predict(X).detach().numpy()
+          y = self.predict(x, True).detach().numpy()
           realisations.append(y)
         return realisations
 
-    def predict(self, X, rw_realisation=False):
+    def predict(self, x, rw_realisation=False):
         if rw_realisation is False:
           # Predict without any time shifting
           p = torch.matmul(basis_X, torch.tensor(torch.zeros(self.B.shape[0])))
         else:
-          rw = torch.cumsum(torch.normal(0, np.exp(self.sigma_t)*self.sr,size=X.shape[1]), axis=1)
-          p = rw[:,::model.sr]
+          rw = np.cumsum(np.random.normal(0, np.exp(self.sigma_t.detach().numpy())*self.sr,size=x.shape[0]*self.sr), axis=0)
+          p = torch.tensor(rw[::model.sr],dtype=torch.float32)
 
-        x_shift = self.shift_rows(X, p)
-        x_shift  = self.nan_mean(x_shift)
-        x_shift = self.fill_nan_with_last_value(x_shift.squeeze(0))
-        x_shift[0] = X[0,0]
+      # Shift across the rows, take the mean and forward fill.
+        x_shift, P = self.shift_rows_differentiable(x, p)
+        P = torch.sum(P, dim=0)
+        x_shift = torch.nansum(x_shift, dim=0)
 
+
+        # Convert the mask zeros to NA values
+        x_shift[torch.abs(P) < 1e-3] = float('nan')
+
+        # Forward fill the NA values
+        x_shift[0] = x[0]
+        x_shift = self.fill_nan_with_last_value(x_shift)
+        
+
+        # Resample and reshape
         x_shift = x_shift[::self.sr]
         x_shift = x_shift[:len(p)]
         x_shift = x_shift.unsqueeze(1)
@@ -249,12 +277,16 @@ class ShiftNetwork(nn.Module):
         # Compute log likelihood of data given model parameters
         sigma = torch.exp(self.sigma)
         sigma_t = torch.exp(self.sigma_t)
+
+        # Compute the error likelihood
         dist = Normal(loc=0, scale=sigma)
         ll = dist.log_prob(y_pred-y).sum()
-        #print(f"error likelihood:{ll}")
 
-        #print(sigma_t)
+        #Random walk shift likelihood
         tl = self.terror_likelihood(self.k_values, sigma_t, self.rw_interval, p)
-        #print(f"t-error:{tl}")
-        # Maximize therefore multiply by -1 (positive for pygad)
-        return -(ll + tl)
+
+        # Maximize for Pygad genetic, minimize for pytorch optimizers
+        if self.opt_max is True:
+          return (ll + tl)
+        else:
+          return -(ll + tl)
