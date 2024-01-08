@@ -6,7 +6,7 @@ from patsy import dmatrix
 
 
 class ShiftNetwork(nn.Module):
-    def __init__(self, n, hidden_size, t, n_knots, opt_max=False):
+    def __init__(self, n, hidden_size, t, n_knots, opt_max=False, non_linear=True):
         super(ShiftNetwork, self).__init__()
 
         # Settings
@@ -17,19 +17,24 @@ class ShiftNetwork(nn.Module):
         self.sr = 10
         self.scale_factor=0.02
         self.opt_max = opt_max
+        self.non_linear = non_linear
 
-        # Trainable Parameters 
+        # Trainable Parameters
         self.B = nn.Parameter(torch.randn(n_knots))
 
-        self.fc1 = nn.Linear(n, hidden_size)
-        self.fc2 = nn.Linear(hidden_size, hidden_size)
-        self.fc3 = nn.Linear(hidden_size, hidden_size)
-        self.fc4 = nn.Linear(hidden_size, 1)
-        self.relu = nn.ReLU()
+        if self.non_linear:
+          self.fc1 = nn.Linear(n, hidden_size)
+          self.fc2 = nn.Linear(hidden_size, hidden_size)
+          self.fc3 = nn.Linear(hidden_size, hidden_size)
+          self.fc4 = nn.Linear(hidden_size, 1)
+          self.relu = nn.ReLU()
+        else:
+          self.fc1 = nn.Parameter(torch.ones(1))
+          self.intercept = nn.Parameter(torch.zeros(1))
 
         # Utility Parameters  (likelihood)
-        self.sigma = nn.Parameter(torch.zeros(1))
-        self.sigma_t = nn.Parameter(torch.zeros(1))
+        self.sigma = nn.Parameter(torch.ones(1))
+        self.sigma_t = nn.Parameter(torch.ones(1))
 
     def set_opt_max(self, is_max):
         self.opt_max = is_max
@@ -64,23 +69,6 @@ class ShiftNetwork(nn.Module):
           b[:, i] = b_i
       return b
 
-    def shift_rows(self, X, p):
-        # Get the dimensions of the input matrix
-        num_rows, num_cols = X.size()
-
-        # Create an empty tensor of the same shape as the input matrix
-        shifted_X = torch.torch.full((X.shape[0],X.shape[1]), float('nan'))
-
-        # Iterate over each row of the input matrix
-        for i in range(0, (len(p)-1)):
-            # Get the shift value for the current row
-            shift_amount = int(p[i].item())  # Convert tensor to scalar
-
-            # Perform the row shifting operation
-            shifted_X[i*self.sr, :] = torch.roll(X[i*self.sr, :], shifts=shift_amount, dims=0)
-
-        return shifted_X
-
 
     def create_shift_matrix(self, p, n_max, tau=10, clamp_max=1000, pad=False):
         pp = p + torch.arange(p.shape[0]).unsqueeze(1)
@@ -94,7 +82,7 @@ class ShiftNetwork(nn.Module):
           power_ = power_**2
         #  # Iteratively multiply
           power_ = torch.clamp(power_, max=clamp_max)
-        
+
         P = torch.exp(-1*(power_))
 
         return P
@@ -105,7 +93,7 @@ class ShiftNetwork(nn.Module):
         # Create the shift matrix form
         P = self.create_shift_matrix(p_expand, n_max=p_expand.shape[0], tau=15, clamp_max=torch.tensor(1000), pad=False)
         # Replace zeros with NANs
-        #P = P[::self.sr,:] 
+        #P = P[::self.sr,:]
         # Expand the input x into the 2d shape
         B = x.view(-1, 1).expand(-1, p_expand.shape[0])
 
@@ -204,7 +192,7 @@ class ShiftNetwork(nn.Module):
         # also clamp the B parameters before hand so they dont get so large.
         #B = torch.clamp(self.B, min=-30, max=30)
         p = torch.matmul(basis_X, self.B )
-        p = p/self.scale_factor
+        p = torch.abs(p/self.scale_factor)
 
         # Shift across the rows, take the mean and forward fill.
         x_shift, P = self.shift_rows_differentiable(x, p)
@@ -218,19 +206,23 @@ class ShiftNetwork(nn.Module):
         # Forward fill the NA values
         x_shift[0] = x[0]
         x_shift = self.fill_nan_with_last_value(x_shift)
-        
+
 
         # Resample and reshape
         x_shift = x_shift[::self.sr]
         x_shift = x_shift[:len(p)]
         x_shift = x_shift.unsqueeze(1)
 
-        # Apply the fc layers
-        h1 = self.relu(self.fc1(x_shift))
-        h2 = self.relu(self.fc2(h1))
-        h3 = self.relu(self.fc3(h2))
-        y = self.fc4(h3)
-        return y.squeeze(1), p
+        if self.non_linear:
+          # Apply the fc layers
+          h1 = self.relu(self.fc1(x_shift))
+          h2 = self.relu(self.fc2(h1))
+          h3 = self.relu(self.fc3(h2))
+          y = self.fc4(h3)
+          y.squeeze(1)
+        else:
+          y = torch.matmul(x_shift, self.fc1) + self.intercept
+        return y,p
 
     def predict_realisations(self,x,n,rw_realisation=True):
         realisations = []
@@ -240,7 +232,7 @@ class ShiftNetwork(nn.Module):
         return realisations
 
     def predict(self, x, rw_realisation=False):
-        if rw_realisation is False:
+        if not rw_realisation:
           # Predict without any time shifting
           p = torch.matmul(basis_X, torch.tensor(torch.zeros(self.B.shape[0])))
         else:
@@ -259,18 +251,22 @@ class ShiftNetwork(nn.Module):
         # Forward fill the NA values
         x_shift[0] = x[0]
         x_shift = self.fill_nan_with_last_value(x_shift)
-        
+
 
         # Resample and reshape
         x_shift = x_shift[::self.sr]
         x_shift = x_shift[:len(p)]
         x_shift = x_shift.unsqueeze(1)
 
-        h1 = self.relu(self.fc1(x_shift))
-        h2 = self.relu(self.fc2(h1))
-        h3 = self.relu(self.fc3(h2))
-        y = self.fc4(h3)
-        return y.squeeze(1)
+        if self.non_linear:
+          h1 = self.relu(self.fc1(x_shift))
+          h2 = self.relu(self.fc2(h1))
+          h3 = self.relu(self.fc3(h2))
+          y = self.fc4(h3)
+          y.squeeze(1)
+        else:
+          y = torch.matmul(x_shift, self.fc1) + self.intercept
+        return y, p
 
     def log_likelihood(self, y_pred, y, p):
 
