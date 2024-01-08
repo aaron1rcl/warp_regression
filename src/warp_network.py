@@ -192,7 +192,7 @@ class ShiftNetwork(nn.Module):
         # also clamp the B parameters before hand so they dont get so large.
         #B = torch.clamp(self.B, min=-30, max=30)
         p = torch.matmul(basis_X, self.B )
-        p = torch.abs(p/self.scale_factor)
+        p = p/self.scale_factor
 
         # Shift across the rows, take the mean and forward fill.
         x_shift, P = self.shift_rows_differentiable(x, p)
