@@ -1,0 +1,6 @@
+src/warp_regression.egg-info/*
+src/data
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
