@@ -11,13 +11,16 @@ from torch import Tensor
 
 from .constants import DEFAULT_PATH_ANCHOR, PathAnchor
 from .forecast import predict_forecast_realisations_torch
+from .prefit import LogTrendAnalysis, PrefitResult, analyze_log_trend, prefit, prefit_synthetic_path
 from .readouts.dual import fit_dual_sine_shared_warp, fit_dual_sine_shared_warp_nonlinear
+from .residual_smooth import ResidualSmoothFit, fit_residual_smooth
 from .readouts.log_trend_sine import fit_warp_model, forecast_future
 from .readouts.parametric import WarpParametricModel
 from .utilities.metrics import _r2_rmse
 
 
 ReadoutKind = Literal["parametric", "dual_linear", "dual_mlp", "log_trend_sine"]
+ResidualSmoothKind = Literal["local_level", "local_trend"]
 
 
 @dataclass
@@ -35,6 +38,7 @@ class WarpModelConfig:
     sr: int = 10
     A_init: float = 2.7
     C_init: float = 0.5
+    residual_smooth: Optional[ResidualSmoothKind] = None
 
 
 @dataclass
@@ -63,9 +67,70 @@ class WarpModel:
     def __init__(self, config: WarpModelConfig) -> None:
         self.config = config
         self._fit: Optional[Dict[str, Any]] = None
+        self._prefit: Optional[PrefitResult] = None
         self._parametric: Optional[WarpParametricModel] = None
         self._drivers: Dict[str, Any] = {}
         self._calendar: Dict[str, Any] = {}
+
+    @property
+    def prefit_result(self) -> Optional[PrefitResult]:
+        return self._prefit
+
+    def prefit(
+        self,
+        y: np.ndarray,
+        *,
+        data: Optional[Dict[str, Any]] = None,
+        t: Optional[np.ndarray] = None,
+        years: Optional[np.ndarray] = None,
+        t_idx: Optional[np.ndarray] = None,
+        t_norm: Optional[np.ndarray] = None,
+        dates: Optional[Any] = None,
+        t_full: Optional[np.ndarray] = None,
+        peak_idx: Optional[np.ndarray] = None,
+        omega: Optional[float] = None,
+        **kwargs: Any,
+    ) -> PrefitResult:
+        """Presize warp driver(s) before joint fit."""
+        cfg = self.config
+        y = np.asarray(y, dtype=np.float64)
+
+        if cfg.readout == "parametric":
+            if data is None:
+                raise ValueError("parametric prefit requires data= from build_synthetic_dataset()")
+            result = prefit_synthetic_path(
+                data, len(y), sr=cfg.sr, path_anchor=cfg.path_anchor
+            )
+        elif cfg.readout in ("dual_linear", "dual_mlp"):
+            if t is None:
+                raise ValueError("dual readout prefit requires t")
+            result = prefit(y, t, n_sines=2, years=years, **kwargs)
+        elif cfg.readout == "log_trend_sine":
+            t_use = t if t is not None else t_norm
+            if t_use is None:
+                raise ValueError("log_trend_sine prefit requires t (pass detrended residual as y)")
+            if peak_idx is None:
+                raise ValueError("log_trend_sine prefit requires peak_idx=")
+            result = prefit(
+                y,
+                t_use,
+                n_sines=1,
+                peak_idx=peak_idx,
+                omega=omega if omega is not None else 5.0,
+                envelope_init=True,
+                t_full=t_full,
+                **kwargs,
+            )
+        else:
+            raise ValueError(f"unknown readout: {cfg.readout}")
+
+        self._prefit = result
+        self._drivers = dict(result.drivers)
+        if t_norm is not None:
+            self._calendar["t_norm"] = t_norm
+        if t_idx is not None:
+            self._calendar["t_idx"] = t_idx
+        return result
 
     @property
     def is_fitted(self) -> bool:
@@ -112,8 +177,13 @@ class WarpModel:
             z1 = drivers.get("z1")
             z2 = drivers.get("z2")
             if t is None or z1 is None or z2 is None:
-                raise ValueError("dual readout requires drivers t, z1, z2")
-            sine_fit = sine_fit or {}
+                if self._prefit is not None:
+                    t = self._prefit.drivers.get("t")
+                    z1 = self._prefit.drivers.get("z1")
+                    z2 = self._prefit.drivers.get("z2")
+                if t is None or z1 is None or z2 is None:
+                    raise ValueError("dual readout requires drivers t, z1, z2 (or call prefit() first)")
+            sine_fit = sine_fit or (self._prefit.sine_fit if self._prefit else {})
             if cfg.readout == "dual_linear":
                 fit = fit_dual_sine_shared_warp(
                     y, t, years=years, n_knots=cfg.n_knots, epochs=cfg.epochs,
@@ -132,8 +202,10 @@ class WarpModel:
             return FitResult(y_hat=y_hat, r2=fit["r2_log"], rmse=fit["rmse_log"], fit=self._fit)
 
         if cfg.readout == "log_trend_sine":
+            if sine_fit is None and self._prefit is not None:
+                sine_fit = self._prefit.sine_fit
             if t_idx is None or t_norm is None or sine_fit is None:
-                raise ValueError("log_trend_sine requires t_idx, t_norm, sine_fit")
+                raise ValueError("log_trend_sine requires t_idx, t_norm, sine_fit (or call prefit() first)")
             fit = fit_warp_model(
                 y, t_idx, t_norm, sine_fit,
                 n_knots=cfg.n_knots, epochs=cfg.epochs, lr=cfg.lr,
@@ -141,6 +213,9 @@ class WarpModel:
                 mlp_layers=cfg.mlp_layers, seed=cfg.seed,
             )
             self._fit = {**fit, "kind": "log_trend_sine"}
+            if cfg.residual_smooth is not None:
+                res_fit = fit_residual_smooth(y - fit["y_hat"], kind=cfg.residual_smooth)
+                self._fit["residual_smooth"] = res_fit
             self._drivers = {"z": np.asarray(sine_fit["z"], dtype=np.float64)[: len(y)]}
             self._calendar = {"t_idx": t_idx, "t_norm": t_norm, "sine_fit": sine_fit}
             return FitResult(y_hat=fit["y_hat"], r2=fit["r2"], rmse=fit["rmse"], fit=self._fit)

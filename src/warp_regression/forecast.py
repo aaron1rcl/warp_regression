@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 import numpy as np
 import torch
 from torch import Tensor
@@ -23,19 +23,31 @@ def build_forecast_bands(
 ) -> Dict[str, np.ndarray]:
     """Terror, error, and combined predictive bands at a common coverage level.
 
-    Combined bands use the Minkowski sum of terror and error envelopes:
-    ``[t_q_lo − margin, t_q_hi + margin]`` where ``margin = z_err · σ_y`` by default.
+    Terror: percentiles of warp-path forecasts (timing uncertainty through readout).
+    Error: diagnostic band around the point forecast (observation noise only).
+    Combined: percentiles of ``paths_terror + ε`` with independent
+    ``ε ~ N(0, σ_y²)`` on each path and index (joint Monte Carlo).
     """
+    paths_terror = np.asarray(paths_terror, dtype=np.float64)
+    y_point = np.asarray(y_point, dtype=np.float64)
     t_q_lo, t_q50, t_q_hi = np.percentile(paths_terror, [pct_lo, 50, pct_hi], axis=0)
+
     if err_margin is None:
-        err_margin = float(z_err * sigma_y)
-    err_margin = np.asarray(err_margin, dtype=np.float64)
-    err_lo = y_point - err_margin
-    err_hi = y_point + err_margin
-    c_q_lo = t_q_lo - err_margin
-    c_q_hi = t_q_hi + err_margin
+        err_margin_arr = np.full_like(y_point, float(z_err * sigma_y), dtype=np.float64)
+    else:
+        err_margin_arr = np.asarray(err_margin, dtype=np.float64)
+        if err_margin_arr.ndim == 0:
+            err_margin_arr = np.full_like(y_point, float(err_margin_arr), dtype=np.float64)
+
+    err_lo = y_point - err_margin_arr
+    err_hi = y_point + err_margin_arr
+
     rng = np.random.default_rng(noise_seed)
-    paths_combined = paths_terror + rng.normal(0.0, sigma_y, size=paths_terror.shape)
+    sigma_draw = err_margin_arr / z_err
+    noise = rng.normal(0.0, 1.0, size=paths_terror.shape) * sigma_draw[np.newaxis, :]
+    paths_combined = paths_terror + noise
+    c_q_lo, c_q50, c_q_hi = np.percentile(paths_combined, [pct_lo, 50, pct_hi], axis=0)
+
     return {
         "t_q_lo": t_q_lo,
         "t_q50": t_q50,
@@ -44,9 +56,48 @@ def build_forecast_bands(
         "err_hi": err_hi,
         "c_q_lo": c_q_lo,
         "c_q_hi": c_q_hi,
-        "c_q50": y_point,
+        "c_q50": c_q50,
         "paths_combined": paths_combined,
-        "err_margin": err_margin,
+        "err_margin": err_margin_arr,
+    }
+
+
+def log1p_error_band_counts(
+    mu_log: np.ndarray,
+    sigma_y: float,
+    z: float = 1.96,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Map homoscedastic log1p observation noise to count-scale error bands.
+
+    For large ``μ = log1p(c)``, a fixed log1p increment ``z·σ`` is a relative
+    fluctuation ``≈ z·σ/μ`` on the count scale: ``ĉ·(1 ± z·σ/μ)``. Using
+    ``expm1(μ ± zσ)`` instead over-widens the orange band versus terror on the
+    count-scale plots (especially at cycle peaks).
+    """
+    mu_log = np.asarray(mu_log, dtype=np.float64)
+    center = np.expm1(mu_log)
+    rel = z * float(sigma_y) / np.maximum(np.abs(mu_log), 0.25)
+    rel = np.minimum(rel, 0.95)
+    return np.maximum(center * (1.0 - rel), 0.0), center * (1.0 + rel)
+
+
+def count_bands_from_log1p_forecast(
+    bands: Dict[str, np.ndarray],
+    y_point: np.ndarray,
+    sigma_y: float,
+    z: float = 1.96,
+) -> Dict[str, np.ndarray]:
+    """Transform log1p forecast bands to counts (terror/combined via ``expm1``)."""
+    y_point = np.asarray(y_point, dtype=np.float64)
+    err_lo_c, err_hi_c = log1p_error_band_counts(y_point, sigma_y, z=z)
+    return {
+        "t_q_lo": np.expm1(bands["t_q_lo"]),
+        "t_q50": np.expm1(bands["t_q50"]),
+        "t_q_hi": np.expm1(bands["t_q_hi"]),
+        "err_lo": err_lo_c,
+        "err_hi": err_hi_c,
+        "c_q_lo": np.expm1(bands["c_q_lo"]),
+        "c_q_hi": np.expm1(bands["c_q_hi"]),
     }
 
 
@@ -251,8 +302,23 @@ def predict_realisations_torch(
     return paths
 
 
-def _synthetic_driver_extended(n_total: int) -> np.ndarray:
-    """Extend WarpPureNumpy sin driver: ``sin(2π·(i+1)/100)``."""
+def _synthetic_driver_extended(
+    n_total: int,
+    sine_fit: Optional[Dict[str, Any]] = None,
+) -> np.ndarray:
+    """Extend the warp driver on the synthetic calendar grid ``(i+1)/100``.
+
+    When ``sine_fit`` is supplied (from ``prefit(n_sines=1)``), reuse its fitted
+    ω/phase — or ``z_full`` when long enough — instead of the unwarped template sine.
+    """
+    if sine_fit:
+        z_full = sine_fit.get("z_full")
+        if z_full is not None and len(z_full) >= n_total:
+            return np.asarray(z_full[:n_total], dtype=np.float64)
+        from .readouts.log_trend_sine import sine_from_fit
+
+        t_ext = np.arange(1, n_total + 1, dtype=np.float64) / 100.0
+        return sine_from_fit(t_ext, sine_fit)
     idx = np.arange(1, n_total + 1, dtype=np.float64)
     return np.sin(2.0 * np.pi * idx / 100.0)
 
@@ -266,6 +332,7 @@ def _predict_forecast_parametric(
     noise_seed: int,
     path_anchor: PathAnchor,
     n_paths_ci: Optional[int] = None,
+    sine_fit: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     n_train = model.n
     n_total = n_train + int(n_future)
@@ -274,7 +341,12 @@ def _predict_forecast_parametric(
         p_train = model.path().cpu().numpy()
         sigma_y = float(torch.exp(model.log_sigma))
         sigma_t = float(torch.exp(model.log_sigma_t))
-    x_ext = _synthetic_driver_extended(n_total)
+    if sine_fit is not None:
+        x_ext = _synthetic_driver_extended(n_total, sine_fit=sine_fit)
+    elif x_train is not None and len(x_train) >= n_total:
+        x_ext = x_train.detach().cpu().numpy()[:n_total]
+    else:
+        x_ext = _synthetic_driver_extended(n_total)
     x_t = torch.tensor(x_ext, dtype=torch.float32)
     paths_p = sample_warp_paths_future_knots(
         p_train, n_total, n_train, sigma_t, model.n_knots, n_draws, seed, path_anchor=path_anchor
@@ -321,6 +393,7 @@ def predict_forecast_realisations_torch(
     path_anchor: PathAnchor = DEFAULT_PATH_ANCHOR,
     *,
     fit: Optional[Dict[str, Any]] = None,
+    sine_fit: Optional[Dict[str, Any]] = None,
     t_idx: Optional[np.ndarray] = None,
     t_norm: Optional[np.ndarray] = None,
     z_full: Optional[np.ndarray] = None,
@@ -355,11 +428,23 @@ def predict_forecast_realisations_torch(
         fc["sigma_y"] = float(fit["warp"]["sigma_y"])
         fc["n_train"] = int(n_obs)
         fc["n_future"] = n_future_use
+        res_fit = fit.get("residual_smooth")
+        if res_fit is not None:
+            from .residual_smooth import apply_residual_forecast
+
+            fc = apply_residual_forecast(
+                fc,
+                res_fit,
+                int(n_obs),
+                fc["sigma_y"],
+                noise_seed=noise_seed,
+            )
         return fc
 
     if model is None:
         raise ValueError("pass model (synthetic) or fit=... (bitcoin)")
     return _predict_forecast_parametric(
-        model, x_train, n_future, n_draws, seed, noise_seed, path_anchor, n_paths_ci=n_paths_ci
+        model, x_train, n_future, n_draws, seed, noise_seed, path_anchor,
+        n_paths_ci=n_paths_ci, sine_fit=sine_fit,
     )
 

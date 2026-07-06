@@ -3,13 +3,36 @@
 from .constants import DEFAULT_PATH_ANCHOR, PathAnchor, NOTEBOOK_LL_TARGET
 from .forecast import (
     build_forecast_bands,
+    count_bands_from_log1p_forecast,
     forecast_lynx_holdout_paths,
+    log1p_error_band_counts,
     per_index_rw_sigma,
     predict_forecast_realisations_torch,
     sample_warp_paths_future,
     sample_warp_paths_future_knots,
 )
 from .model import FitResult, ForecastResult, WarpModel, WarpModelConfig
+from .cycle_analysis import (
+    CycleLengthAnalysis,
+    analyze_cycle_lengths,
+    nominal_cycle_length,
+    plot_cycle_length_distribution,
+    sample_next_cycle_lengths,
+)
+from .residual_smooth import (
+    ResidualSmoothFit,
+    ResidualSmoothKind,
+    apply_residual_forecast,
+    fit_residual_smooth,
+    forecast_residual,
+)
+from .prefit import (
+    LogTrendAnalysis,
+    PrefitResult,
+    analyze_log_trend,
+    prefit,
+    prefit_synthetic_path,
+)
 from .readouts.parametric import EvalReport, WarpParametricModel, evaluate_model
 from .readouts.dual import (
     fit_dual_sine_shared_warp,
@@ -27,6 +50,7 @@ from .readouts.log_trend_sine import (
     normalized_time,
     day_index,
     split_bitcoin_holdout,
+    sine_from_fit,
 )
 from .drivers.sine import (
     align_sine_to_macro_peaks,
@@ -53,11 +77,28 @@ __all__ = [
     "WarpModelConfig",
     "FitResult",
     "ForecastResult",
+    "ResidualSmoothFit",
+    "ResidualSmoothKind",
+    "fit_residual_smooth",
+    "forecast_residual",
+    "apply_residual_forecast",
+    "CycleLengthAnalysis",
+    "analyze_cycle_lengths",
+    "nominal_cycle_length",
+    "plot_cycle_length_distribution",
+    "sample_next_cycle_lengths",
+    "PrefitResult",
+    "LogTrendAnalysis",
+    "prefit",
+    "prefit_synthetic_path",
+    "analyze_log_trend",
     "WarpParametricModel",
     "WarpReadout",
     "EvalReport",
     "NOTEBOOK_LL_TARGET",
     "build_forecast_bands",
+    "count_bands_from_log1p_forecast",
+    "log1p_error_band_counts",
     "forecast_lynx_holdout_paths",
     "predict_forecast_realisations_torch",
     "predict_realisations_torch",
@@ -79,6 +120,7 @@ __all__ = [
     "fetch_bitcoin_daily",
     "fit_log_trend",
     "fit_sine_peak_presize",
+    "sine_from_fit",
     "build_sine_features",
     "SineSpec",
     "sine_wave",

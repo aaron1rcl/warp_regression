@@ -131,7 +131,7 @@ def _sine(
     return np.sin(2.0 * np.pi * omega * time_scale * t + phase + t_shift)
 
 
-def _sine_from_fit(t: np.ndarray, sine_fit: Dict[str, Any]) -> np.ndarray:
+def sine_from_fit(t: np.ndarray, sine_fit: Dict[str, Any]) -> np.ndarray:
     return _sine(
         t,
         sine_fit["omega"],
@@ -139,6 +139,9 @@ def _sine_from_fit(t: np.ndarray, sine_fit: Dict[str, Any]) -> np.ndarray:
         time_scale=sine_fit.get("time_scale", 1.0),
         t_shift=sine_fit.get("t_shift", 0.0),
     )
+
+
+_sine_from_fit = sine_from_fit
 
 
 def _peak_center(year: int) -> pd.Timestamp:
@@ -189,55 +192,10 @@ def fit_log_trend(
     y: np.ndarray, t_idx: np.ndarray, z_grid: Optional[np.ndarray] = None
 ) -> Tuple[float, float, float, np.ndarray, Dict[str, Any]]:
     """Fit C + B·log(t_idx − z), searching z to avoid the log(1)=0 corner."""
-    if z_grid is None:
-        z_grid = _t_z_candidates()
-    best_rss = np.inf
-    best: Optional[Tuple[float, float, float, np.ndarray]] = None
-    for z in z_grid:
-        if np.any(t_idx - z <= 0):
-            continue
-        log_t = log_shifted_day_index(t_idx, float(z))
-        X = np.column_stack([log_t, np.ones(len(y))])
-        coef, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
-        B, C = float(coef[0]), float(coef[1])
-        trend = C + B * log_t
-        rss = float(np.dot(y - trend, y - trend))
-        if rss < best_rss:
-            best_rss = rss
-            best = (B, C, float(z), trend)
-    if best is None:
-        raise ValueError("no valid z in log(t − z) presize grid")
-    B, C, z, trend = best
-    z_global = z
-    ep_before = float(abs(y[-1] - trend[-1]))
+    from ..prefit import analyze_log_trend
 
-    def trend_at_z(zz: float) -> np.ndarray:
-        if np.any(t_idx - zz <= 0):
-            return trend
-        log_t = log_shifted_day_index(t_idx, zz)
-        X = np.column_stack([log_t, np.ones(len(y))])
-        coef, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
-        return coef[1] + coef[0] * log_t
-
-    z_span = float(z_grid.max() - z_grid.min())
-    z_refined, _, ep_after = refine_param_endpoint(
-        y, trend_at_z, z, (z - 0.25 * z_span, z + 0.25 * z_span)
-    )
-    if np.all(t_idx - z_refined > 0):
-        log_t = log_shifted_day_index(t_idx, z_refined)
-        X = np.column_stack([log_t, np.ones(len(y))])
-        coef, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
-        B, C = float(coef[0]), float(coef[1])
-        trend = C + B * log_t
-        z = z_refined
-
-    pin = {
-        "endpoint_before": ep_before,
-        "endpoint_after": float(abs(y[-1] - trend[-1])),
-        "z_before": z_global,
-        "z_after": z,
-    }
-    return B, C, z, trend, pin
+    out = analyze_log_trend(y, t_idx, z_grid=z_grid)
+    return out.B, out.C, out.z, out.trend, out.pin
 
 
 def fit_sine_peak_presize(
@@ -248,63 +206,27 @@ def fit_sine_peak_presize(
     n_phase: int = 360,
 ) -> Dict[str, Any]:
     """Presize sine to N_CYCLE_PEAKS full cycles; endpoint-pin φ to macro peaks."""
+    from ..prefit import prefit
+
     peak_idx = detect_btc_cycle_peaks(y_prefit, dates)
-    omega = float(N_CYCLE_PEAKS)
-
-    y_c = y_residual - y_residual.mean()
-    best_peak_align, best_corr, best_ph = -np.inf, -np.inf, 0.0
-    for ph in np.linspace(0.0, 2.0 * np.pi, n_phase, endpoint=False):
-        z = _sine(t, omega, ph)
-        peak_align = float(np.mean(z[peak_idx]))
-        z_c = z - z.mean()
-        denom = np.linalg.norm(y_c) * (np.linalg.norm(z_c) + 1e-12)
-        corr = float(np.dot(y_c, z_c) / (denom + 1e-12))
-        if peak_align > best_peak_align + 1e-9 or (
-            abs(peak_align - best_peak_align) <= 1e-9 and corr > best_corr
-        ):
-            best_peak_align, best_corr, best_ph = peak_align, corr, float(ph)
-
-    last_peak_pin = align_sine_to_macro_peaks(t, peak_idx, omega, best_ph)
-    phase = last_peak_pin["phase"]
-    time_scale = last_peak_pin["time_scale"]
-    t_shift = last_peak_pin.get("t_shift", 0.0)
-    z = _sine(t, omega, phase, time_scale, t_shift)
-    driver = t * z
-    denom = float(np.dot(driver, driver) + 1e-12)
-    f_init = float(np.dot(y_residual, driver) / denom)
-    d_vals: List[float] = []
-    for pi in peak_idx:
-        env = (1.0 - t[pi]) * f_init * z[pi]
-        if abs(env) > 1e-6:
-            d_vals.append((y_residual[pi] - f_init * z[pi]) / env)
-    d_init = float(max(np.median(d_vals), 0.0)) if d_vals else 0.0
+    pf = prefit(
+        y_residual,
+        t,
+        n_sines=1,
+        peak_idx=peak_idx,
+        omega=float(N_CYCLE_PEAKS),
+        n_phase=n_phase,
+        envelope_init=True,
+    )
+    sine_fit = dict(pf.sine_fit)
+    sine_fit["n_cycles"] = N_CYCLE_PEAKS
+    sine_fit["omega_from_peaks"] = omega_from_peak_times(t, peak_idx)
+    sine_fit["period_series_units"] = 1.0 / float(N_CYCLE_PEAKS)
+    sine_fit["peak_dates"] = [str(dates[i].date()) for i in peak_idx]
     last_idx = len(t) - 1
-    cyclic_end = f_init * (1.0 + d_init * (1.0 - t[last_idx])) * z[last_idx]
-    return {
-        "omega": omega,
-        "n_cycles": N_CYCLE_PEAKS,
-        "omega_from_peaks": omega_from_peak_times(t, peak_idx),
-        "phase": phase,
-        "peak_align": best_peak_align,
-        "presize_corr": best_corr,
-        "f_init": f_init,
-        "d_init": d_init,
-        "time_scale": time_scale,
-        "t_shift": t_shift,
-        "peak_k": last_peak_pin.get("peak_k"),
-        "n_peaks": len(peak_idx),
-        "period_series_units": 1.0 / omega,
-        "peak_idx": peak_idx,
-        "peak_dates": [str(dates[i].date()) for i in peak_idx],
-        "z": z,
-        "endpoint_pin": {
-            "last_macro_peak_idx": int(peak_idx[-1]),
-            "last_sine_peak_idx": int(last_peak_pin.get("last_peak_idx", peak_idx[-1])),
-            "last_peak_value": float(last_peak_pin.get("last_peak_value", z[peak_idx[-1]])),
-            "endpoint_residual": float(abs(y_residual[last_idx] - cyclic_end)),
-        },
-        "last_peak_pin": last_peak_pin,
-    }
+    cyclic_end = sine_fit["f_init"] * (1.0 + sine_fit["d_init"] * (1.0 - t[last_idx])) * sine_fit["z"][last_idx]
+    sine_fit["endpoint_pin"]["endpoint_residual"] = float(abs(y_residual[last_idx] - cyclic_end))
+    return sine_fit
 
 
 class TimeMLP(nn.Module):

@@ -370,15 +370,24 @@ def presize_log_trend_sine(
     dates: pd.DatetimeIndex,
     **kwargs: Any,
 ) -> Dict[str, Any]:
-    """Bitcoin presize recipe: log trend + peak-aligned sine on residuals."""
-    from ..readouts.log_trend_sine import fit_log_trend, fit_sine_peak_presize
+    """Deprecated: use analyze_log_trend + prefit(n_sines=1)."""
+    from ..prefit import analyze_log_trend, prefit
+    from ..readouts.log_trend_sine import detect_btc_cycle_peaks
 
-    B, C, z, trend, trend_pin = fit_log_trend(y, t_idx)
-    residual = y - trend
-    sine_fit = fit_sine_peak_presize(residual, y, t, dates, **kwargs)
+    prep = analyze_log_trend(y, t_idx)
+    peak_idx = detect_btc_cycle_peaks(y, dates)
+    pf = prefit(
+        prep.residual,
+        t,
+        n_sines=1,
+        peak_idx=peak_idx,
+        omega=float(kwargs.get("omega", 5.0)),
+        envelope_init=True,
+        **kwargs,
+    )
     return {
-        "trend": {"B": B, "C": C, "z": z, "trend": trend, "pin": trend_pin},
-        "sine_fit": sine_fit,
-        "z": sine_fit["z"],
+        "trend": {"B": prep.B, "C": prep.C, "z": prep.z, "trend": prep.trend, "pin": prep.pin},
+        "sine_fit": pf.sine_fit,
+        "z": pf.sine_fit["z"],
     }
 
