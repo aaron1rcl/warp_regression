@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "warp_regression"
+version = "0.1.0"
+description = "Unified warp regression for synthetic, Lynx, and Bitcoin forecasting"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.22",
+    "pandas>=1.4",
+    "torch>=2.0",
+    "matplotlib>=3.5",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "nbconvert>=7.0", "ipykernel>=6.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["src/tests"]
+pythonpath = ["src"]
+markers = [
+    "slow: full-epoch reproduction (Bitcoin 24k epochs)",
+]
