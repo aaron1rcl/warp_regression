@@ -20,7 +20,6 @@ from .utilities.metrics import _r2_rmse
 
 
 ReadoutKind = Literal["parametric", "dual_linear", "dual_mlp", "log_trend_sine"]
-ResidualSmoothKind = Literal["local_level", "local_trend"]
 
 
 @dataclass
@@ -38,7 +37,7 @@ class WarpModelConfig:
     sr: int = 10
     A_init: float = 2.7
     C_init: float = 0.5
-    residual_smooth: Optional[ResidualSmoothKind] = None
+    residual_smooth_horizon: Optional[int] = None
 
 
 @dataclass
@@ -213,8 +212,8 @@ class WarpModel:
                 mlp_layers=cfg.mlp_layers, seed=cfg.seed,
             )
             self._fit = {**fit, "kind": "log_trend_sine"}
-            if cfg.residual_smooth is not None:
-                res_fit = fit_residual_smooth(y - fit["y_hat"], kind=cfg.residual_smooth)
+            if cfg.residual_smooth_horizon is not None:
+                res_fit = fit_residual_smooth(y - fit["y_hat"], horizon=cfg.residual_smooth_horizon)
                 self._fit["residual_smooth"] = res_fit
             self._drivers = {"z": np.asarray(sine_fit["z"], dtype=np.float64)[: len(y)]}
             self._calendar = {"t_idx": t_idx, "t_norm": t_norm, "sine_fit": sine_fit}

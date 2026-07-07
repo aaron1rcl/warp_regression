@@ -95,17 +95,25 @@ def _last_crest_at_or_before(
     mean_cycle_length: float,
     min_sep: int,
 ) -> Optional[int]:
-    """Most recent positive crest at or before ``anchor``."""
+    """Most recent positive crest at or before ``anchor``.
+
+    The slice is extended by one past ``anchor`` so that a peak exactly at
+    ``anchor`` (which needs ``y[anchor+1]`` to confirm it is a local maximum)
+    is detected; detected peaks are then filtered to those at or before
+    ``anchor`` before returning the last one.
+    """
     win_start = max(1, anchor - int(1.25 * mean_cycle_length))
-    peaks = _local_maxima(y[win_start : anchor + 1], min_sep, crest_only=True)
-    if peaks.size:
-        return int(peaks[-1]) + win_start
+    slice_end = min(len(y), anchor + 2)
+    peaks = _local_maxima(y[win_start:slice_end], min_sep, crest_only=True)
+    valid = [p for p in peaks if win_start + p <= anchor]
+    if valid:
+        return int(valid[-1]) + win_start
     return None
 
 
-def _first_crest_after(y: np.ndarray, after: int, *, min_sep: int) -> Optional[int]:
-    """First positive crest strictly after ``after``, at least ``min_sep`` away."""
-    i = after + min_sep
+def _first_crest_after(y: np.ndarray, after: int) -> Optional[int]:
+    """First positive crest strictly after ``after``."""
+    i = after + 1
     n = len(y)
     while i < n - 1:
         if y[i] > 0.0 and y[i] >= y[i - 1] and y[i] > y[i + 1]:
@@ -138,19 +146,24 @@ def _next_cycle_length_on_path(
     anchor: int,
     mean_cycle_length: float,
 ) -> Optional[float]:
-    """Peak-to-peak length: last crest at/before anchor → first crest after anchor."""
+    """Peak-to-peak length: last crest at/before anchor → first crest after anchor.
+
+    The "next crest" search starts at ``max(anchor, last_peak + min_sep - 1)``
+    so that echoes from a crest exactly at the anchor boundary are skipped.
+    """
     min_sep = max(1, int(0.35 * mean_cycle_length))
     last_peak = _last_crest_at_or_before(
         y, anchor, mean_cycle_length=mean_cycle_length, min_sep=min_sep
     )
     if last_peak is None:
         return None
-    next_peak = _first_crest_after(y, max(anchor, last_peak), min_sep=min_sep)
-    if next_peak is None or next_peak <= anchor:
+    search_after = max(anchor, last_peak + min_sep - 1)
+    next_peak = _first_crest_after(y, search_after)
+    if next_peak is None:
         return None
     length = float(next_peak - last_peak)
     lo = 0.5 * mean_cycle_length
-    hi = 2.5 * mean_cycle_length
+    hi = 1.75 * mean_cycle_length
     if length < lo or length > hi:
         return None
     return length

@@ -25,7 +25,7 @@ from ..forecast import (
     sample_warp_paths_future_knots,
 )
 from ..utilities.metrics import _r2_rmse
-from ..utilities.plot import format_date_axis
+from ..plotting import format_date_axis
 
 DATA_PATH = BITCOIN_CSV
 

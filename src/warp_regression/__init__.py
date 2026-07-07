@@ -21,7 +21,6 @@ from .cycle_analysis import (
 )
 from .residual_smooth import (
     ResidualSmoothFit,
-    ResidualSmoothKind,
     apply_residual_forecast,
     fit_residual_smooth,
     forecast_residual,
@@ -65,7 +64,15 @@ from .drivers.sine import (
 from .utilities.datasets import build_synthetic_dataset, prepare_lynx_log
 from .utilities.splits import cumsum_path_to_stored_path, split_lynx_holdout, split_synthetic_holdout
 from .utilities.metrics import _r2_rmse
-from .utilities.plot import format_date_axis, plot_bands, plot_realisations, plot_warp_offset
+from .plotting import (
+    format_date_axis,
+    plot_before_after_warp,
+    plot_dual_objective_scatter,
+    plot_fit_with_residual,
+    plot_forecast_bands,
+    plot_realisation_spaghetti,
+    plot_warp_offset,
+)
 from .core.path import applied_path_offset_numpy, stored_path_offset_numpy, point_forecast_path
 from .readouts.parametric import predict_realisations_torch
 from .core.warp import soft_warp_numpy, soft_warp_sine_numpy
@@ -78,7 +85,6 @@ __all__ = [
     "FitResult",
     "ForecastResult",
     "ResidualSmoothFit",
-    "ResidualSmoothKind",
     "fit_residual_smooth",
     "forecast_residual",
     "apply_residual_forecast",
@@ -126,8 +132,11 @@ __all__ = [
     "sine_wave",
     "presize_dual_sine",
     "presize_log_trend_sine",
-    "plot_realisations",
-    "plot_bands",
+    "plot_realisation_spaghetti",
+    "plot_forecast_bands",
     "plot_warp_offset",
+    "plot_fit_with_residual",
+    "plot_before_after_warp",
+    "plot_dual_objective_scatter",
     "format_date_axis",
 ]

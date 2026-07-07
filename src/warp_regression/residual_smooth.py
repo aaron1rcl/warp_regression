@@ -1,133 +1,83 @@
-"""Optional ETS-style smoothing on train residuals after warp fit."""
+"""Moving-average residual layer added on top of a warp forecast."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Optional, Tuple
 
 import numpy as np
 
 from .forecast import build_forecast_bands
 
-ResidualSmoothKind = Literal["local_level", "local_trend"]
-
 
 @dataclass
 class ResidualSmoothFit:
-    """Fitted Holt exponential smoother on warp residuals."""
+    """MA-smoothed residual level for additive correction of warp forecasts.
 
-    kind: ResidualSmoothKind
+    ``level`` is the mean of the last ``horizon`` training residuals; the
+    forecast is a flat constant equal to ``level`` for all future steps.
+    ``fitted`` holds the rolling-MA values over the training window (for
+    in-sample display).  ``sigma`` is the std of the last ``horizon``
+    residuals, used to widen combined bands in ``apply_residual_forecast``.
+    """
+
     level: float
-    trend: float
-    alpha: float
-    beta: float
     sigma: float
     fitted: np.ndarray
     n_train: int
-
-
-def _holt_smooth(
-    residual: np.ndarray,
-    alpha: float,
-    beta: float,
-    *,
-    with_trend: bool,
-) -> Tuple[np.ndarray, np.ndarray]:
-    r = np.asarray(residual, dtype=np.float64)
-    n = len(r)
-    level = np.zeros(n, dtype=np.float64)
-    trend = np.zeros(n, dtype=np.float64)
-    level[0] = r[0]
-    trend[0] = (r[1] - r[0]) if n > 1 and with_trend else 0.0
-    for t in range(1, n):
-        prev_level = level[t - 1]
-        prev_trend = trend[t - 1]
-        if with_trend:
-            level[t] = alpha * r[t] + (1.0 - alpha) * (prev_level + prev_trend)
-            trend[t] = beta * (level[t] - prev_level) + (1.0 - beta) * prev_trend
-        else:
-            level[t] = alpha * r[t] + (1.0 - alpha) * prev_level
-    return level, trend
-
-
-def _holt_fitted(
-    residual: np.ndarray,
-    alpha: float,
-    beta: float,
-    *,
-    with_trend: bool,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    level, trend = _holt_smooth(residual, alpha, beta, with_trend=with_trend)
-    fitted = np.zeros_like(residual, dtype=np.float64)
-    fitted[0] = level[0]
-    for t in range(1, len(residual)):
-        fitted[t] = level[t - 1] + (trend[t - 1] if with_trend else 0.0)
-    return level, trend, fitted
-
-
-def _grid_search_holt(
-    residual: np.ndarray,
-    *,
-    with_trend: bool,
-) -> Tuple[float, float, np.ndarray, np.ndarray, np.ndarray]:
-    best_sse = np.inf
-    best: Tuple[float, float, np.ndarray, np.ndarray, np.ndarray] | None = None
-    alphas = np.linspace(0.05, 0.95, 19)
-    betas = np.linspace(0.05, 0.95, 19) if with_trend else (0.0,)
-    for alpha in alphas:
-        for beta in betas:
-            level, trend, fitted = _holt_fitted(residual, alpha, beta, with_trend=with_trend)
-            sse = float(np.sum((residual - fitted) ** 2))
-            if sse < best_sse:
-                best_sse = sse
-                best = (float(alpha), float(beta), level, trend, fitted)
-    assert best is not None
-    return best
+    horizon: int
 
 
 def fit_residual_smooth(
     residual: np.ndarray,
-    kind: ResidualSmoothKind = "local_trend",
+    *,
+    horizon: int,
 ) -> ResidualSmoothFit:
-    """Fit Holt local level (A,N,N) or local linear trend (A,A,N) on train residuals."""
+    """Fit a moving-average residual layer on ``residual = y_obs − ŷ_warp``.
+
+    Parameters
+    ----------
+    residual:
+        1-D array of training residuals.
+    horizon:
+        Look-back window (and forecast horizon).  The level is
+        ``mean(residual[-horizon:])``; the in-sample fitted series is a
+        causal rolling mean with the same window width.
+    """
     residual = np.asarray(residual, dtype=np.float64)
-    if residual.ndim != 1:
-        raise ValueError("residual must be 1-D")
-    if len(residual) < 2:
-        raise ValueError("residual must have length >= 2")
-    with_trend = kind == "local_trend"
-    alpha, beta, level, trend, fitted = _grid_search_holt(residual, with_trend=with_trend)
-    innov = residual[1:] - fitted[1:]
-    sigma = float(np.std(innov)) if len(innov) > 1 else 0.0
+    if residual.ndim != 1 or len(residual) < 1:
+        raise ValueError("residual must be a non-empty 1-D array")
+    h = max(1, min(int(horizon), len(residual)))
+
+    level = float(np.mean(residual[-h:]))
+    sigma = float(np.std(residual[-h:])) if h > 1 else 0.0
+
+    # Causal rolling MA with window h (shrinking window at the start)
+    n = len(residual)
+    fitted = np.empty(n, dtype=np.float64)
+    for t in range(n):
+        w = min(t + 1, h)
+        fitted[t] = float(np.mean(residual[t + 1 - w : t + 1]))
+
     return ResidualSmoothFit(
-        kind=kind,
-        level=float(level[-1]),
-        trend=float(trend[-1]) if with_trend else 0.0,
-        alpha=alpha,
-        beta=beta,
+        level=level,
         sigma=sigma,
         fitted=fitted,
-        n_train=len(residual),
+        n_train=n,
+        horizon=h,
     )
 
 
 def forecast_residual(res_fit: ResidualSmoothFit, n_future: int) -> np.ndarray:
-    """Point forecast of residuals h=1..n_future steps beyond train end."""
+    """Flat residual forecast: ``level`` repeated for ``n_future`` steps."""
     n_future = int(n_future)
     if n_future <= 0:
         return np.zeros(0, dtype=np.float64)
-    h = np.arange(1, n_future + 1, dtype=np.float64)
-    if res_fit.kind == "local_trend":
-        return res_fit.level + h * res_fit.trend
     return np.full(n_future, res_fit.level, dtype=np.float64)
 
 
 def forecast_residual_std(res_fit: ResidualSmoothFit, horizons: np.ndarray) -> np.ndarray:
-    """Approximate residual forecast standard deviation by horizon."""
-    h = np.maximum(np.asarray(horizons, dtype=np.float64), 1.0)
-    if res_fit.kind == "local_trend":
-        return res_fit.sigma * np.sqrt(h)
-    return np.full_like(h, res_fit.sigma)
+    """Residual forecast uncertainty: constant ``sigma`` across all horizons."""
+    return np.full(len(np.asarray(horizons)), res_fit.sigma, dtype=np.float64)
 
 
 def residual_adjustment(
@@ -135,7 +85,7 @@ def residual_adjustment(
     n_total: int,
     n_obs: int,
 ) -> np.ndarray:
-    """Full-length additive residual correction (in-sample fitted + future forecast)."""
+    """Full-length additive correction (rolling-MA in-sample + flat forecast out-of-sample)."""
     n_obs = int(n_obs)
     n_total = int(n_total)
     add = np.zeros(n_total, dtype=np.float64)
@@ -154,7 +104,7 @@ def apply_residual_forecast(
     *,
     noise_seed: int = 2,
 ) -> dict:
-    """Compose warp forecast with residual smoother and rebuild bands."""
+    """Compose warp forecast with the MA residual layer and rebuild bands."""
     n_obs = int(n_obs)
     n_total = int(fc["n_total"])
     add = residual_adjustment(res_fit, n_total, n_obs)
@@ -168,8 +118,8 @@ def apply_residual_forecast(
     n_future = n_total - n_obs
     err_margin = np.full(n_total, 1.96 * float(sigma_y), dtype=np.float64)
     if n_future > 0:
-        h = np.arange(1, n_future + 1, dtype=np.float64)
-        res_std = forecast_residual_std(res_fit, h)
+        h_arr = np.arange(1, n_future + 1, dtype=np.float64)
+        res_std = forecast_residual_std(res_fit, h_arr)
         err_margin[n_obs:] = 1.96 * np.sqrt(float(sigma_y) ** 2 + res_std ** 2)
 
     paths_ci = fc.get("preds_ci", fc["preds"])
@@ -180,7 +130,6 @@ def apply_residual_forecast(
         noise_seed=noise_seed,
         err_margin=err_margin,
     )
-    fc["bands"]["c_q50"] = fc["y_point"]
     fc["residual_smooth"] = res_fit
     fc["residual_add"] = add
     return fc
