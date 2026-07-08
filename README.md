@@ -130,3 +130,64 @@ pytest src/tests/ -v -m slow   # full Bitcoin reproduction (24k epochs)
 jupyter nbconvert --execute --to notebook --inplace src/notebooks/*.ipynb
 jupyter nbconvert --to html src/notebooks/*.ipynb --output-dir src/notebooks/
 ```
+
+---
+
+## How this compares
+
+Warp regression sits at the overlap of a few different fields: alignment methods that also warp time (DTW,
+neural time-warping nets, curve registration), classical time series models that also do cyclical inference
+(structural time series, Markov-switching), and general nonlinear regressors that also give you a posterior
+(Gaussian processes, deep sequence nets). The table below is a fair, warts-included comparison across the
+properties that matter to this repo's actual use case: modelling a quasi-periodic signal that reads out a
+known shape after a warp, forecasting it, and getting a calibrated answer to "when does the next cycle land".
+For the reasoning behind each cell, references, and key formulas, see
+[`legacy/info/comparable_methods.md`](legacy/info/comparable_methods.md).
+
+| Property | **Warp regression**<br><sub>this repo</sub> | **Sequence alignment**<br><sub>DTW / soft-DTW</sub> | **Structural time series**<br><sub>Harvey UCM / TBATS</sub> | **Neural time warping**<br><sub>DTAN / RF-DTAN</sub> | **Curve registration**<br><sub>elastic FDA / SRVF</sub> | **Gaussian process**<br><sub>warped GP</sub> | **Regime-switching**<br><sub>Markov-switching</sub> | **Deep sequence models**<br><sub>LSTM / Transformer / DeepAR</sub> |
+|---|---|---|---|---|---|---|---|---|
+| **— Core modeling —** | | | | | | | | |
+| Native time warping of nonuniform timing shifts | Yes — the core mechanism | Yes — its whole purpose | No — fixed frequency, phase rotates via an AR(2)-like recursion | Yes — learns input-dependent diffeomorphic warps | Yes — the core object of study | Yes — input- or output-warped kernel | No — discrete regime jumps, not a continuous warp | No — relies on capacity/attention to absorb shifts implicitly |
+| Combining multiple cyclical components under one shared warp | Yes — e.g. Lynx's two sines share one path | No — pairwise alignment, not multi-component decomposition | Partial — TBATS: multiple seasonalities; vanilla UCM: one cycle | No — aligns one signal ensemble at a time | No — registers one curve at a time | Partial — can sum periodic kernels, each with its own hyperparameters | No — regimes, not additive components | Partial — can learn multiple periodicities implicitly given enough data |
+| Nonlinear input-to-output mapping | Yes — optional MLP output functions | N/A — a distance/loss, not a model | No — linear Gaussian state space | Yes — neural net based | N/A — geometric framework, not regression | Yes — nonparametric | Partial — piecewise-linear-ish via regime switching | Yes — very flexible |
+| Handles irregular / missing timestamps | No — assumes a regular calendar-index grid | Partial — variable-length sequences, not true irregular time | No — regular grid assumed | Partial — RF-DTAN supports variable-length signals | Partial — usually resampled to a common grid | Yes — arbitrary input locations natively | No — discrete-time grid | Partial — some time-aware variants exist |
+| **— Forecasting & inference —** | | | | | | | | |
+| Usable for forecasting (extrapolation) | Yes — stochastic path continuation | No — an alignment/loss tool used inside other forecasters | Yes — Kalman filter/smoother, core use case | No — built for alignment, averaging, classification | No — built for registration and shape statistics | Yes — posterior predictive extrapolation | Yes — regime-averaged forecasts | Yes — primary use case |
+| Usable for classical statistical inference (std. errors, tests) | Partial — likelihood-based, no classical std. errors yet | No — no likelihood, no parameters to test | Yes — MLE with standard errors, well established | No | Yes — Fisher-Rao metric gives formal hypothesis tests | Yes — full Bayesian posterior over hyperparameters | Yes — Hamilton filter, well established | No — black-box weights |
+| Parameter interpretability | High — $\sigma_t$, $\sigma_y$, period, phase all meaningful | Low — an alignment path, no generative parameters | High — level/trend/cycle amplitude and frequency | Low — the warp is a neural net output | High — explicit phase vs. amplitude split | Partial — kernel hyperparameters meaningful, warp function less so | High — regimes map to real states | Low — black box |
+| Stochastic cycle-length distribution (vs. a single fixed period) | Yes — core feature, Monte Carlo over future warp paths | No | No — one fixed frequency, no wander | No | No — deterministic warp per curve | Partial — can sample posterior draws and measure empirically | Partial — regime duration is geometric-ish via transition probabilities | No — would need post-hoc peak detection on sampled outputs |
+| **— Uncertainty —** | | | | | | | | |
+| Calibrated predictive uncertainty | Yes — joint Monte Carlo terror + error bands | No | Yes — analytic Kalman filter covariance | No | No | Yes — native posterior variance | Yes — filtered regime probabilities + forecast distribution | Partial — quantile loss / MC dropout / ensembles, not native likelihood |
+| Bayesian-compatible via an explicit likelihood | Yes — the dual likelihood is the posterior kernel | No — no likelihood | Yes — Gaussian state space, natural conjugate priors (`bsts`) | No | Partial — Bayesian SRVF extensions exist, not mainstream | Yes — fully Bayesian by construction | Yes — MCMC estimation common (Kim & Nelson) | Partial — Bayesian deep learning exists as an add-on |
+| **— Practicality —** | | | | | | | | |
+| Differentiable / PyTorch or JAX native | Yes — native autograd end to end | Partial — soft-DTW yes, classic DTW no | No — MLE via quasi-Newton | Yes — that's the whole point | No — dynamic-programming optimisation | Yes — GPyTorch / GPflow are autodiff-native | No — specialised filters (EM/MLE) | Yes — PyTorch/JAX native by design |
+| Data efficiency (small-n, e.g. Lynx's 90 points) | High — demonstrated at $n=90$ | High — pairwise, no training needed for classic DTW | High — designed for short annual series | Low — needs an ensemble of signals to learn alignment | High — designed for small samples of curves | High for small-n; cubic cost limits large-n | Moderate — needs enough observed regime transitions | Low — notoriously data-hungry |
+| Fitting speed / compute cost | Fast — seconds to minutes, gradient descent | Fast (DTW); soft-DTW is quadratic in sequence length | Fast — seconds | Moderate — neural net training | Moderate — DP alignment, iterative Karcher mean | Slow — cubic in $n$ (sparse/inducing-point variants help) | Fast to moderate | Slow — GPU, many epochs, tuning |
+| Maturity of open-source tooling | None — this repo only, brand new | Yes — `tslearn`, `dtaidistance`, widely used | Yes — `statsmodels`, R `KFAS`/`bsts`, decades of use | Low — research-grade reference implementations only | Yes — `fdasrvf`, well established in statistics | Yes — `GPyTorch`, `GPflow`, `scikit-learn` | Yes — `statsmodels`, R `MSwM` | Yes — huge ecosystem (`GluonTS`, `Darts`, `PyTorch Forecasting`) |
+
+### When to use it, and when not
+
+Warp regression is the only method above pairing a native differentiable warp path with an explicit dual
+likelihood and a built-in distribution over future cycle *timing*, not just cycle height. That is the reason
+it exists: most tools in this table either warp (DTW, DTAN, elastic FDA) without a probabilistic forecast, or
+forecast (structural time series, Markov-switching, deep sequence nets) without treating the timing of the
+next cycle as an uncertain, model-able quantity in its own right.
+
+Reach for it when you have a quasi-periodic series with a plausible parametric shape (a sine, a sum of sines,
+a trend-plus-sine), where the timing of that shape drifts rather than resetting on a fixed calendar phase, the
+sample size is small-to-medium (tens to a few thousand points, not millions), and a calibrated answer to "when
+does the next peak actually land" matters as much as "how high will it be". The Lynx and Bitcoin notebooks in
+this repo are exactly that profile.
+
+Don't reach for it when there is no plausible shape to warp in the first place (a deep sequence net or a
+Gaussian process will find structure you can't hand-specify); when the series is long or high-frequency and
+mature tooling with textbook standard errors matters more than bespoke uncertainty (Harvey's UCM/TBATS via
+`statsmodels`, or R's `KFAS`/`bsts`, are the safer default); when the actual task is aligning or classifying an
+ensemble of signals rather than forecasting one (DTW or DTAN); when irregular or missing timestamps are a
+first-order concern (a Gaussian process handles that natively, warp regression currently assumes a regular
+index grid); or in any production setting where "one repo, no peer review, no released package" is
+disqualifying on its own.
+
+None of this is a knock on warp regression specifically — it's a young, single-purpose research tool built to
+answer one question well, not a general-purpose forecasting library. Use it when that one question is the
+question you actually have.
