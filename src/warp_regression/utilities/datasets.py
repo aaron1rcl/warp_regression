@@ -6,11 +6,17 @@ from typing import Any, Dict, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from ..constants import LYNX_CSV, DATA_ROOT, BITCOIN_CSV
+from ..constants import LYNX_CSV, DATA_ROOT, BITCOIN_CSV, SUNSPOTS_CSV
 
-def prepare_lynx_log(csv_path: Path | str = LYNX_CSV, transform: str = "log1p") -> Dict[str, Any]:
+
+def _load_series_csv(
+    csv_path: Path | str,
+    transform: str,
+    *,
+    year_dtype: Any = np.float64,
+) -> Dict[str, Any]:
     df = pd.read_csv(csv_path)
-    years = df["time"].to_numpy(dtype=np.int32)
+    years = df["time"].to_numpy(dtype=year_dtype)
     counts = df["value"].to_numpy(dtype=np.float64)
     n = len(years)
     t = np.linspace(0.0, 1.0, n)
@@ -23,6 +29,15 @@ def prepare_lynx_log(csv_path: Path | str = LYNX_CSV, transform: str = "log1p") 
     else:
         raise ValueError(transform)
     return {"years": years, "counts": counts, "t": t, "y_log": y_log, "n": n, "transform": transform}
+
+
+def prepare_lynx_log(csv_path: Path | str = LYNX_CSV, transform: str = "log1p") -> Dict[str, Any]:
+    return _load_series_csv(csv_path, transform, year_dtype=np.int32)
+
+
+def prepare_sunspots(csv_path: Path | str = SUNSPOTS_CSV, transform: str = "identity") -> Dict[str, Any]:
+    """Monthly total sunspot number (SILSO, 1749-present). ``years`` is decimal-year."""
+    return _load_series_csv(csv_path, transform, year_dtype=np.float64)
 
 
 def matrix_decomp(x: np.ndarray, n: int, sr: int) -> np.ndarray:

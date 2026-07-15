@@ -93,8 +93,9 @@ either per index (band construction) or per knot with piecewise-linear interpola
 | Notebook | Setting | Readout |
 |----------|---------|---------|
 | `WarpDifferentiable.ipynb` | Synthetic sine driver | Linear $A \cdot \mathrm{warp}(x) + C$ |
-| `LynxForecast.ipynb` | Hudson Bay lynx (log counts) | Dual sines + shared warp + MLPs $f,g$ |
+| `LynxForecast.ipynb` | Hudson Bay lynx, annual counts | Dual sines + shared warp + MLPs $f,g$ |
 | `BitcoinWarp.ipynb` | Daily BTC log-price | Presized macro sine + trend + MLP |
+| `SunspotsForecast.ipynb` | Monthly sunspot number, 1749-present | Dual sines + shared warp + MLPs $f,g$ |
 
 Each walks through train-only fit, warp path diagnostics, and holdout forecast with terror / error / combined 95% bands.
 
@@ -106,7 +107,7 @@ Each walks through train-only fit, warp path diagnostics, and holdout forecast w
 legacy/          # archived ShiftNetwork reference
 src/
   warp_regression/   # importable package (WarpModel facade, plotting.py for shared notebook plots)
-  data/              # lynx.csv, bitcoin_daily.csv
+  data/              # lynx.csv, bitcoin_daily.csv, sunspots_monthly.csv
   tests/             # pytest + baseline metrics
   notebooks/         # tutorial notebooks + HTML exports
 ```
@@ -155,14 +156,14 @@ For the reasoning behind each cell, references, and key formulas, see
 | Usable for forecasting (extrapolation) | Yes: stochastic path continuation | No: an alignment/loss tool used inside other forecasters | Yes: Kalman filter/smoother, core use case | No: built for alignment, averaging, classification | No: built for registration and shape statistics | Yes: posterior predictive extrapolation | Yes: regime-averaged forecasts | Yes: primary use case |
 | Usable for classical statistical inference (std. errors, tests) | Partial: likelihood-based, no classical std. errors yet | No: no likelihood, no parameters to test | Yes: MLE with standard errors, well established | No | Yes: Fisher-Rao metric gives formal hypothesis tests | Yes: full Bayesian posterior over hyperparameters | Yes: Hamilton filter, well established | No: black-box weights |
 | Parameter interpretability | High: $\sigma_t$, $\sigma_y$, period, phase all meaningful | Low: an alignment path, no generative parameters | High: level/trend/cycle amplitude and frequency | Low: the warp is a neural net output | High: explicit phase vs. amplitude split | Partial: kernel hyperparameters meaningful, warp function less so | High: regimes map to real states | Low: black box |
-| Stochastic cycle-length distribution (vs. a single fixed period) | Yes: core feature, Monte Carlo over future warp paths | No | No: one fixed frequency, no wander | No | No: deterministic warp per curve | Partial: can sample posterior draws and measure empirically | Partial: regime duration is geometric-ish via transition probabilities | No: would need post-hoc peak detection on sampled outputs |
+| Stochastic cycle-length distribution (vs. a single fixed period) | Yes: core feature, Monte Carlo over future warp paths | No | No: one fixed frequency, no wander | No | No: deterministic warp per curve | Partial: no explicit warp path, needs post-hoc peak detection on posterior draws | Partial: regime duration is geometric-ish via transition probabilities | No: would need post-hoc peak detection on sampled outputs |
 | **Uncertainty** | | | | | | | | |
 | Calibrated predictive uncertainty | Yes: joint Monte Carlo terror + error bands | No | Yes: analytic Kalman filter covariance | No | No | Yes: native posterior variance | Yes: filtered regime probabilities + forecast distribution | Partial: quantile loss / MC dropout / ensembles, not native likelihood |
 | Bayesian-compatible via an explicit likelihood | Yes: the dual likelihood is the posterior kernel | No: no likelihood | Yes: Gaussian state space, natural conjugate priors (`bsts`) | No | Partial: Bayesian SRVF extensions exist, not mainstream | Yes: fully Bayesian by construction | Yes: MCMC estimation common (Kim & Nelson) | Partial: Bayesian deep learning exists as an add-on |
 | **Practicality** | | | | | | | | |
 | Differentiable / PyTorch or JAX native | Yes: native autograd end to end | Partial: soft-DTW yes, classic DTW no | No: MLE via quasi-Newton | Yes: that's the whole point | No: dynamic-programming optimisation | Yes: GPyTorch / GPflow are autodiff-native | No: specialised filters (EM/MLE) | Yes: PyTorch/JAX native by design |
 | Data efficiency (small-n, e.g. Lynx's 90 points) | High: demonstrated at $n=90$ | High: pairwise, no training needed for classic DTW | High: designed for short annual series | Low: needs an ensemble of signals to learn alignment | High: designed for small samples of curves | High for small-n; cubic cost limits large-n | Moderate: needs enough observed regime transitions | Low: notoriously data-hungry |
-| Fitting speed / compute cost | Fast: seconds to minutes, gradient descent | Fast (DTW); soft-DTW is quadratic in sequence length | Fast: seconds | Moderate: neural net training | Moderate: DP alignment, iterative Karcher mean | Slow: cubic in $n$ (sparse/inducing-point variants help) | Fast to moderate | Slow: GPU, many epochs, tuning |
+| Fitting speed / compute cost | Fast: seconds to minutes, gradient descent | Fast (DTW); soft-DTW is quadratic in sequence length | Fast: seconds | Moderate: neural net training | Moderate: DP alignment, iterative Karcher mean | Slow for a generic kernel ($O(n^3)$); state-space-representable kernels (Matern, stochastic-oscillator) give exact $O(n)$ | Fast to moderate | Slow: GPU, many epochs, tuning |
 | Maturity of open-source tooling | None: this repo only, brand new | Yes: `tslearn`, `dtaidistance`, widely used | Yes: `statsmodels`, R `KFAS`/`bsts`, decades of use | Low: research-grade reference implementations only | Yes: `fdasrvf`, well established in statistics | Yes: `GPyTorch`, `GPflow`, `scikit-learn` | Yes: `statsmodels`, R `MSwM` | Yes: huge ecosystem (`GluonTS`, `Darts`, `PyTorch Forecasting`) |
 
 ### When to use it, and when not
