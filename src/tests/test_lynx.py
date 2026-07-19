@@ -27,7 +27,7 @@ def test_lynx_holdout(baselines):
             readout="dual_mlp",
             n_knots=14,
             epochs=cfg_b["epochs"],
-            fit_lambda=1.0,
+            fit_lambda=0.5,
             seed=cfg_b["seed"],
         )
     )

@@ -1,9 +1,9 @@
 {
   "synthetic": {
     "data_seed": 12,
-    "test_corr": 0.548,
+    "test_corr": 0.774,
     "test_corr_tol": 0.05,
-    "test_rmse": 0.68,
+    "test_rmse": 0.487,
     "test_rmse_tol": 0.08,
     "epochs": 5000,
     "A_init": 1.0,
@@ -14,7 +14,7 @@
   "lynx": {
     "train_r2": 0.951,
     "train_r2_tol": 0.02,
-    "test_corr": 0.712,
+    "test_corr": 0.765,
     "test_corr_tol": 0.05,
     "epochs": 2500,
     "seed": 0
@@ -26,7 +26,7 @@
     "test_rmse_tol": 0.05,
     "epochs": 24000,
     "seed": 0,
-    "fit_lambda": 0.9,
+    "fit_lambda": 0.5,
     "n_knots": 8
   }
 }

@@ -39,7 +39,7 @@ def fit_dual_sine_shared_warp(
     n_knots: int = 14,
     epochs: int = 1500,
     lr: float = 0.03,
-    fit_lambda: Optional[float] = 1.0,
+    fit_lambda: Optional[float] = 0.5,
     seed: int = 0,
     sine_fit: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
@@ -52,8 +52,9 @@ def fit_dual_sine_shared_warp(
     readout = ScalarReadout()
 
     def forward_fn(B: Tensor, _lsy: Tensor, _lst: Tensor) -> Tuple[Tensor, Tensor]:
-        p = path_from_B_torch(B, n, n_knots, "identity")
-        z1w, z2w = soft_warp_torch(z1_t, p), soft_warp_torch(z2_t, p)
+        p = path_from_B_torch(B, n, n_knots, "identity", path_anchor=DEFAULT_PATH_ANCHOR)
+        z1w = soft_warp_torch(z1_t, p, path_anchor=DEFAULT_PATH_ANCHOR)
+        z2w = soft_warp_torch(z2_t, p, path_anchor=DEFAULT_PATH_ANCHOR)
         readout.fit_ls(z1w.detach().cpu().numpy(), z2w.detach().cpu().numpy(), y_log)
         return readout(z1w, z2w), p
 
@@ -64,7 +65,8 @@ def fit_dual_sine_shared_warp(
         extra_params=list(readout.parameters()),
     )
     p = result["warp"]["p"]
-    z1w, z2w = soft_warp_numpy(z1, p), soft_warp_numpy(z2, p)
+    z1w = soft_warp_numpy(z1, p, path_anchor=DEFAULT_PATH_ANCHOR)
+    z2w = soft_warp_numpy(z2, p, path_anchor=DEFAULT_PATH_ANCHOR)
     y_hat = readout(torch.tensor(z1w, dtype=torch.float32), torch.tensor(z2w, dtype=torch.float32)).detach().numpy()
     r2, rmse = _r2_rmse(y_log, y_hat)
     r2_u, _ = _r2_rmse(y_log, sine_fit["y_hat_log"])
@@ -81,13 +83,17 @@ def fit_dual_sine_shared_warp(
         "warp": {
             "p": p,
             "B": result["B"].numpy(),
+            "n_knots": n_knots,
+            "path_anchor": DEFAULT_PATH_ANCHOR,
             "obj_err": w["obj_err"],
             "obj_time": w["obj_time"],
             "sigma_y": w["sigma_y"],
             "sigma_t": w["sigma_t"],
             "max_abs_offset": float(np.max(np.abs(p - np.arange(n)))),
         },
+        "n_knots": n_knots,
         "readout": readout,
+        "_y_log_train": np.asarray(y_log, dtype=np.float64),
     }
 
 
@@ -115,7 +121,7 @@ def fit_dual_sine_shared_warp_nonlinear(
     hidden: int = 32,
     n_hidden_layers: int = 2,
     lr: float = 0.03,
-    fit_lambda: Optional[float] = 1.0,
+    fit_lambda: Optional[float] = 0.5,
     seed: int = 0,
     sine_fit: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
@@ -132,8 +138,9 @@ def fit_dual_sine_shared_warp_nonlinear(
     B_init = torch.tensor(lin["warp"]["B"], dtype=torch.float32)
 
     def forward_fn(B: Tensor, _lsy: Tensor, _lst: Tensor) -> Tuple[Tensor, Tensor]:
-        p = path_from_B_torch(B, n, n_knots, "identity")
-        z1w, z2w = soft_warp_torch(z1_t, p), soft_warp_torch(z2_t, p)
+        p = path_from_B_torch(B, n, n_knots, "identity", path_anchor=DEFAULT_PATH_ANCHOR)
+        z1w = soft_warp_torch(z1_t, p, path_anchor=DEFAULT_PATH_ANCHOR)
+        z2w = soft_warp_torch(z2_t, p, path_anchor=DEFAULT_PATH_ANCHOR)
         return f_net(z1w) + g_net(z2w), p
 
     result = train_dual_warp(
@@ -144,7 +151,8 @@ def fit_dual_sine_shared_warp_nonlinear(
         B_init=B_init,
     )
     p = result["warp"]["p"]
-    z1w, z2w = soft_warp_numpy(z1, p), soft_warp_numpy(z2, p)
+    z1w = soft_warp_numpy(z1, p, path_anchor=DEFAULT_PATH_ANCHOR)
+    z2w = soft_warp_numpy(z2, p, path_anchor=DEFAULT_PATH_ANCHOR)
     z1w_t = torch.tensor(z1w, dtype=torch.float32)
     z2w_t = torch.tensor(z2w, dtype=torch.float32)
     y_hat = (f_net(z1w_t) + g_net(z2w_t)).detach().numpy()
@@ -163,12 +171,16 @@ def fit_dual_sine_shared_warp_nonlinear(
             **lin["warp"],
             "p": p,
             "B": result["B"].numpy(),
+            "n_knots": n_knots,
+            "path_anchor": DEFAULT_PATH_ANCHOR,
             "obj_err": result["warp"]["obj_err"],
             "obj_time": result["warp"]["obj_time"],
             "sigma_y": result["warp"]["sigma_y"],
             "sigma_t": result["warp"]["sigma_t"],
             "max_abs_offset": float(np.max(np.abs(p - np.arange(n)))),
         },
+        "n_knots": n_knots,
+        "_y_log_train": np.asarray(y_log, dtype=np.float64),
     }
 
 

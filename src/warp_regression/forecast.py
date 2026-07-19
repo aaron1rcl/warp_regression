@@ -1,39 +1,109 @@
 from __future__ import annotations
 
-
-from typing import Any, Dict, Optional, Tuple
+from dataclasses import dataclass, field
+from statistics import NormalDist
+from typing import Any, Callable, Dict, Optional, Tuple, Union
 import numpy as np
 import torch
 from torch import Tensor
 
 from .constants import DEFAULT_PATH_ANCHOR, PathAnchor
-from .core.path import knot_positions, point_forecast_path
-from .core.warp import path_for_warp_numpy, soft_warp_numpy
+from .core.path import (
+    knot_positions,
+    point_forecast_path,
+)
+from .core.warp import (
+    soft_warp_numpy,
+    soft_warp_prefit_sine_numpy,
+    soft_warp_prefit_sine_torch,
+    soft_warp_torch,
+)
 from .readouts.parametric import WarpParametricModel, evaluate_model
+
+
+def _synthetic_driver_extended(
+    n_total: int,
+    sine_fit: Optional[Dict[str, Any]] = None,
+) -> np.ndarray:
+    """Extend the warp driver on the synthetic calendar grid ``(i+1)/100``."""
+    if sine_fit:
+        z_full = sine_fit.get("z_full")
+        if z_full is not None and len(z_full) >= n_total:
+            return np.asarray(z_full[:n_total], dtype=np.float64)
+        from .readouts.log_trend_sine import sine_from_fit
+
+        t_ext = np.arange(1, n_total + 1, dtype=np.float64) / 100.0
+        return sine_from_fit(t_ext, sine_fit)
+    idx = np.arange(1, n_total + 1, dtype=np.float64)
+    return np.sin(2.0 * np.pi * idx / 100.0)
+
+
+def ci_band_params(ci: float) -> Tuple[float, float, float]:
+    """Map central coverage ``ci`` (e.g. 0.95) to ``(pct_lo, pct_hi, z_err)``."""
+    ci = float(ci)
+    if not 0.0 < ci < 1.0:
+        raise ValueError(f"ci must be in (0, 1), got {ci}")
+    alpha = 1.0 - ci
+    pct_lo = 100.0 * (alpha / 2.0)
+    pct_hi = 100.0 * (1.0 - alpha / 2.0)
+    z_err = float(NormalDist().inv_cdf(1.0 - alpha / 2.0))
+    return pct_lo, pct_hi, z_err
+
+
+def interval_coverage(
+    y: np.ndarray,
+    lo: np.ndarray,
+    hi: np.ndarray,
+) -> float:
+    """Empirical fraction of ``y`` falling inside ``[lo, hi]`` (equal-length arrays)."""
+    y = np.asarray(y, dtype=np.float64)
+    lo = np.asarray(lo, dtype=np.float64)
+    hi = np.asarray(hi, dtype=np.float64)
+    if y.shape != lo.shape or y.shape != hi.shape:
+        raise ValueError(f"shape mismatch: y={y.shape}, lo={lo.shape}, hi={hi.shape}")
+    if y.size == 0:
+        return float("nan")
+    return float(np.mean((y >= lo) & (y <= hi)))
+
 
 def build_forecast_bands(
     paths_terror: np.ndarray,
     y_point: np.ndarray,
     sigma_y: float,
-    pct_lo: float = 2.5,
-    pct_hi: float = 97.5,
-    z_err: float = 1.96,
+    ci: float = 0.95,
+    *,
+    pct_lo: Optional[float] = None,
+    pct_hi: Optional[float] = None,
+    z_err: Optional[float] = None,
     noise_seed: int = 2,
     err_margin: Optional[np.ndarray] = None,
+    err_mean: float = 0.0,
 ) -> Dict[str, np.ndarray]:
-    """Terror, error, and combined predictive bands at a common coverage level.
+    """Terror, error, and combined predictive bands at coverage ``ci``.
 
     Terror: percentiles of warp-path forecasts (timing uncertainty through readout).
     Error: diagnostic band around the point forecast (observation noise only).
-    Combined: percentiles of ``paths_terror + ε`` with independent
-    ``ε ~ N(0, σ_y²)`` on each path and index (joint Monte Carlo).
+    Combined: percentiles of ``r + e`` where ``r`` is a terror path and
+    ``e_t ~ N(μ, σ_t²)`` is drawn iid per time step (and independently per
+    realisation). If ``err_margin`` is time-varying, ``σ_t = err_margin_t / z_err``.
+
+    ``ci`` is the nominal central coverage (default 0.95). Optional ``pct_lo`` /
+    ``pct_hi`` / ``z_err`` override the values derived from ``ci``.
     """
+    p_lo, p_hi, z = ci_band_params(ci)
+    if pct_lo is not None:
+        p_lo = float(pct_lo)
+    if pct_hi is not None:
+        p_hi = float(pct_hi)
+    if z_err is not None:
+        z = float(z_err)
+
     paths_terror = np.asarray(paths_terror, dtype=np.float64)
     y_point = np.asarray(y_point, dtype=np.float64)
-    t_q_lo, t_q50, t_q_hi = np.percentile(paths_terror, [pct_lo, 50, pct_hi], axis=0)
+    t_q_lo, t_q50, t_q_hi = np.percentile(paths_terror, [p_lo, 50, p_hi], axis=0)
 
     if err_margin is None:
-        err_margin_arr = np.full_like(y_point, float(z_err * sigma_y), dtype=np.float64)
+        err_margin_arr = np.full_like(y_point, float(z * sigma_y), dtype=np.float64)
     else:
         err_margin_arr = np.asarray(err_margin, dtype=np.float64)
         if err_margin_arr.ndim == 0:
@@ -43,12 +113,20 @@ def build_forecast_bands(
     err_hi = y_point + err_margin_arr
 
     rng = np.random.default_rng(noise_seed)
-    sigma_draw = err_margin_arr / z_err
-    noise = rng.normal(0.0, 1.0, size=paths_terror.shape) * sigma_draw[np.newaxis, :]
-    paths_combined = paths_terror + noise
-    c_q_lo, c_q50, c_q_hi = np.percentile(paths_combined, [pct_lo, 50, pct_hi], axis=0)
+    sigma_draw = err_margin_arr / z
+    e = rng.normal(
+        float(err_mean),
+        sigma_draw[np.newaxis, :],
+        size=paths_terror.shape,
+    )
+    paths_combined = paths_terror + e
+    c_q_lo, c_q50, c_q_hi = np.percentile(paths_combined, [p_lo, 50, p_hi], axis=0)
 
     return {
+        "ci": float(ci),
+        "pct_lo": float(p_lo),
+        "pct_hi": float(p_hi),
+        "z_err": float(z),
         "t_q_lo": t_q_lo,
         "t_q50": t_q50,
         "t_q_hi": t_q_hi,
@@ -59,6 +137,7 @@ def build_forecast_bands(
         "c_q50": c_q50,
         "paths_combined": paths_combined,
         "err_margin": err_margin_arr,
+        "err_draws": e,
     }
 
 
@@ -102,6 +181,419 @@ def count_bands_from_log1p_forecast(
 
 
 # ---------------------------------------------------------------------------
+# Forecast state + sampling
+# ---------------------------------------------------------------------------
+
+PredictFn = Callable[[np.ndarray], np.ndarray]
+ExtendPredictFn = Callable[[np.ndarray, int], PredictFn]
+
+
+@dataclass
+class ForecastState:
+    """Normalized fit state for series-agnostic forecasting."""
+
+    p: np.ndarray
+    sigma_t: float
+    sigma_y: float
+    n_knots: int
+    n_train: int
+    path_mode: str
+    path_anchor: PathAnchor
+    predict_train: PredictFn
+    extend_predict: ExtendPredictFn
+    B: Optional[np.ndarray] = None
+    meta: Dict[str, Any] = field(default_factory=dict)
+
+
+
+
+def _dual_predict_fns(
+    z1: np.ndarray,
+    z2: np.ndarray,
+    readout: Any,
+    *,
+    reverse_path: bool = False,
+) -> Tuple[PredictFn, Callable[[Tensor], Tensor]]:
+    """Predict helpers for prepare/forecast.
+
+    Prepared paths are calendar-start-pinned with ``stored == applied``, so
+    soft-warp must not reverse (``reverse_path=False``). Reversing would map
+    future RW noise onto the past and collapse forecast terror bands.
+    """
+    z1 = np.asarray(z1, dtype=np.float64)
+    z2 = np.asarray(z2, dtype=np.float64)
+    z1_t = torch.tensor(z1, dtype=torch.float32)
+    z2_t = torch.tensor(z2, dtype=torch.float32)
+
+    if isinstance(readout, dict) and "f" in readout and "g" in readout:
+        f_net, g_net = readout["f"], readout["g"]
+        f_net.eval()
+        g_net.eval()
+
+        def predict_np(p: np.ndarray) -> np.ndarray:
+            with torch.no_grad():
+                return predict_torch(torch.tensor(p, dtype=torch.float32)).numpy()
+
+        def predict_torch(p: Tensor) -> Tensor:
+            z1w = soft_warp_torch(z1_t, p, reverse_path=reverse_path)
+            z2w = soft_warp_torch(z2_t, p, reverse_path=reverse_path)
+            return f_net(z1w) + g_net(z2w)
+
+        return predict_np, predict_torch
+
+    def predict_np(p: np.ndarray) -> np.ndarray:
+        with torch.no_grad():
+            return predict_torch(torch.tensor(p, dtype=torch.float32)).detach().numpy()
+
+    def predict_torch(p: Tensor) -> Tensor:
+        z1w = soft_warp_torch(z1_t, p, reverse_path=reverse_path)
+        z2w = soft_warp_torch(z2_t, p, reverse_path=reverse_path)
+        return readout(z1w, z2w)
+
+    return predict_np, predict_torch
+
+
+def _as_forecast_state_parametric(
+    model: WarpParametricModel,
+    *,
+    x_full: Optional[np.ndarray] = None,
+    sine_fit: Optional[Dict[str, Any]] = None,
+) -> ForecastState:
+    with torch.no_grad():
+        p = model.path().detach().cpu().numpy()
+        sigma_y = float(torch.exp(model.log_sigma))
+        sigma_t = float(torch.exp(model.log_sigma_t))
+        B = model.B.detach().cpu().numpy().copy()
+    n_train = int(model.n)
+    path_mode = model.path_mode
+    fit_anchor: PathAnchor = getattr(model, "path_anchor", DEFAULT_PATH_ANCHOR)
+    use_prefit_sine = (
+        sine_fit is not None and sine_fit.get("dt") is not None and sine_fit.get("t0") is not None
+    )
+    if not use_prefit_sine:
+        if x_full is not None and len(x_full) >= n_train:
+            x_tr = np.asarray(x_full[:n_train], dtype=np.float64)
+        else:
+            x_tr = _synthetic_driver_extended(n_train, sine_fit=sine_fit)
+        x_tr_t = torch.tensor(x_tr, dtype=torch.float32)
+
+    def _readout(z: Tensor) -> Tensor:
+        return torch.exp(model.log_A) * z + model.C
+
+    def predict_train(p_tr: np.ndarray) -> np.ndarray:
+        with torch.no_grad():
+            p_t = torch.tensor(p_tr, dtype=torch.float32)
+            if use_prefit_sine:
+                z = soft_warp_prefit_sine_torch(p_t, sine_fit, path_mode=path_mode)
+            else:
+                z = soft_warp_torch(x_tr_t, p_t, reverse_path=False, path_mode=path_mode)
+            return _readout(z).detach().cpu().numpy()
+
+    def predict_train_torch(p: Tensor) -> Tensor:
+        if use_prefit_sine:
+            z = soft_warp_prefit_sine_torch(p, sine_fit, path_mode=path_mode)
+        else:
+            z = soft_warp_torch(x_tr_t, p, reverse_path=False, path_mode=path_mode)
+        return _readout(z)
+
+    def extend_predict(p_tr: np.ndarray, n_future: int) -> PredictFn:
+        n_total = n_train + int(n_future)
+        if not use_prefit_sine:
+            if x_full is not None and len(x_full) >= n_total:
+                x_ext = np.asarray(x_full[:n_total], dtype=np.float64)
+            else:
+                # Headroom so expansion can pull known future sine into the window.
+                x_ext = _synthetic_driver_extended(n_total + n_train, sine_fit=sine_fit)
+            x_t = torch.tensor(x_ext, dtype=torch.float32)
+
+        def predict_full(p_full: np.ndarray) -> np.ndarray:
+            with torch.no_grad():
+                p_t = torch.tensor(p_full, dtype=torch.float32)
+                if use_prefit_sine:
+                    z = soft_warp_prefit_sine_torch(p_t, sine_fit, path_mode=path_mode)
+                else:
+                    z = soft_warp_torch(x_t, p_t, reverse_path=False, path_mode=path_mode)
+                return _readout(z).detach().cpu().numpy()
+
+        return predict_full
+
+    return ForecastState(
+        p=np.asarray(p, dtype=np.float64),
+        sigma_t=sigma_t,
+        sigma_y=sigma_y,
+        n_knots=int(model.n_knots),
+        n_train=n_train,
+        path_mode=path_mode,
+        path_anchor=fit_anchor,
+        predict_train=predict_train,
+        extend_predict=extend_predict,
+        B=B,
+        meta={"kind": "parametric", "sine_fit": sine_fit, "predict_train_torch": predict_train_torch},
+    )
+
+
+def _as_forecast_state_dual(
+    fit: Dict[str, Any],
+    *,
+    z1_full: np.ndarray,
+    z2_full: np.ndarray,
+    n_train: Optional[int] = None,
+) -> ForecastState:
+    warp = fit["warp"]
+    p = np.asarray(warp["p"], dtype=np.float64)
+    n_tr = int(n_train if n_train is not None else len(p))
+    p = p[:n_tr]
+    n_knots = int(warp.get("n_knots", fit.get("n_knots", 14)))
+    B = warp.get("B")
+    if B is not None:
+        B = np.asarray(B, dtype=np.float64)
+    z1_full = np.asarray(z1_full, dtype=np.float64)
+    z2_full = np.asarray(z2_full, dtype=np.float64)
+    readout = fit["readout"]
+    predict_train, predict_train_torch = _dual_predict_fns(
+        z1_full[:n_tr], z2_full[:n_tr], readout, reverse_path=False
+    )
+
+    def extend_predict(p_tr: np.ndarray, n_future: int) -> PredictFn:
+        n_total = n_tr + int(n_future)
+        if len(z1_full) < n_total or len(z2_full) < n_total:
+            raise ValueError("z1_full/z2_full must cover n_train + n_future")
+        predict_full, _ = _dual_predict_fns(
+            z1_full[:n_total], z2_full[:n_total], readout, reverse_path=False
+        )
+        return predict_full
+
+    return ForecastState(
+        p=p,
+        sigma_t=float(warp["sigma_t"]),
+        sigma_y=float(warp["sigma_y"]),
+        n_knots=n_knots,
+        n_train=n_tr,
+        path_mode="identity",
+        path_anchor=DEFAULT_PATH_ANCHOR,
+        predict_train=predict_train,
+        extend_predict=extend_predict,
+        B=B,
+        meta={
+            "kind": fit.get("kind", "dual"),
+            "fit": fit,
+            "predict_train_torch": predict_train_torch,
+        },
+    )
+
+
+def _as_forecast_state_bitcoin(
+    fit: Dict[str, Any],
+    *,
+    t_idx_full: np.ndarray,
+    t_norm_full: np.ndarray,
+    z_full: np.ndarray,
+    n_obs: Optional[int] = None,
+) -> ForecastState:
+    from .readouts.log_trend_sine import predict_components
+    from .core.warp import soft_warp_sine_torch
+
+    warp = fit["warp"]
+    p = np.asarray(warp["p"], dtype=np.float64)
+    n_tr = int(n_obs if n_obs is not None else len(p))
+    p = p[:n_tr]
+    n_knots = int(fit.get("n_knots", warp.get("n_knots", 14)))
+    B = warp.get("B_spline", warp.get("B"))
+    if B is not None:
+        B = np.asarray(B, dtype=np.float64)
+    readout = fit["readout"]
+    sine_fit = fit.get("sine_fit")
+    n_cal = int(fit.get("n_calendar", n_tr))
+    t_idx_full = np.asarray(t_idx_full, dtype=np.float64)
+    t_norm_full = np.asarray(t_norm_full, dtype=np.float64)
+    z_full = np.asarray(z_full, dtype=np.float64)
+    pred_kw: Dict[str, Any] = {"path_anchor": DEFAULT_PATH_ANCHOR}
+    if sine_fit is not None:
+        pred_kw.update({"sine_fit": sine_fit, "n_norm": n_cal})
+    t_idx_tr = torch.tensor(t_idx_full[:n_tr], dtype=torch.float32)
+    t_norm_tr = torch.tensor(t_norm_full[:n_tr], dtype=torch.float32)
+    z_tr_t = torch.tensor(z_full[:n_tr], dtype=torch.float32)
+
+    def predict_train(p_tr: np.ndarray) -> np.ndarray:
+        return predict_components(
+            readout,
+            t_idx_full[:n_tr],
+            t_norm_full[:n_tr],
+            z_full[:n_tr],
+            p_tr,
+            **pred_kw,
+        )[2]
+
+    def predict_train_torch(p: Tensor) -> Tensor:
+        if sine_fit is not None:
+            zw = soft_warp_sine_torch(
+                p,
+                n_cal,
+                sine_fit["omega"],
+                sine_fit["phase"],
+                time_scale=sine_fit.get("time_scale", 1.0),
+                t_shift=sine_fit.get("t_shift", 0.0),
+                reverse_path=False,
+            )
+        else:
+            zw = soft_warp_torch(z_tr_t, p, reverse_path=False)
+        return readout(t_idx_tr, t_norm_tr, zw)
+
+    def extend_predict(p_tr: np.ndarray, n_future: int) -> PredictFn:
+        n_total = n_tr + int(n_future)
+        if len(z_full) < n_total:
+            raise ValueError("z_full must cover n_obs + n_future")
+
+        def predict_full(p_full: np.ndarray) -> np.ndarray:
+            return predict_components(
+                readout,
+                t_idx_full[:n_total],
+                t_norm_full[:n_total],
+                z_full[:n_total],
+                p_full,
+                **pred_kw,
+            )[2]
+
+        return predict_full
+
+    return ForecastState(
+        p=p,
+        sigma_t=float(warp["sigma_t"]),
+        sigma_y=float(warp["sigma_y"]),
+        n_knots=n_knots,
+        n_train=n_tr,
+        path_mode="identity",
+        path_anchor=DEFAULT_PATH_ANCHOR,
+        predict_train=predict_train,
+        extend_predict=extend_predict,
+        B=B,
+        meta={
+            "kind": "log_trend_sine",
+            "fit": fit,
+            "predict_train_torch": predict_train_torch,
+        },
+    )
+
+
+def as_forecast_state(
+    source: Union[WarpParametricModel, Dict[str, Any]],
+    *,
+    x_full: Optional[np.ndarray] = None,
+    z1_full: Optional[np.ndarray] = None,
+    z2_full: Optional[np.ndarray] = None,
+    t_idx_full: Optional[np.ndarray] = None,
+    t_norm_full: Optional[np.ndarray] = None,
+    z_full: Optional[np.ndarray] = None,
+    n_train: Optional[int] = None,
+    n_obs: Optional[int] = None,
+    sine_fit: Optional[Dict[str, Any]] = None,
+) -> ForecastState:
+    """Normalize a parametric model or fit dict into ``ForecastState``."""
+    if isinstance(source, WarpParametricModel):
+        return _as_forecast_state_parametric(source, x_full=x_full, sine_fit=sine_fit)
+
+    fit = source
+    kind = fit.get("kind")
+    if kind in ("dual_linear", "dual_mlp") or (z1_full is not None and z2_full is not None and "readout" in fit):
+        if z1_full is None or z2_full is None:
+            raise ValueError("dual fit state requires z1_full and z2_full")
+        return _as_forecast_state_dual(fit, z1_full=z1_full, z2_full=z2_full, n_train=n_train)
+
+    if kind == "log_trend_sine" or (t_idx_full is not None and z_full is not None and "readout" in fit):
+        if t_idx_full is None or t_norm_full is None or z_full is None:
+            raise ValueError("bitcoin fit state requires t_idx_full, t_norm_full, z_full")
+        return _as_forecast_state_bitcoin(
+            fit,
+            t_idx_full=t_idx_full,
+            t_norm_full=t_norm_full,
+            z_full=z_full,
+            n_obs=n_obs if n_obs is not None else n_train,
+        )
+
+    raise ValueError("unrecognized forecast source; pass WarpParametricModel or a known fit dict")
+
+
+
+def forecast_from_state(
+    state: ForecastState,
+    n_future: int,
+    *,
+    n_draws: int = 400,
+    n_paths_ci: Optional[int] = None,
+    seed: int = 0,
+    noise_seed: int = 2,
+    ci: float = 0.95,
+) -> Dict[str, Any]:
+    """Sample future warps from the fitted path.
+
+    Start-pin: MAP train path is kept through the second-to-last knot; the last
+    train knot gets a terror-scale kick, then the usual future knot RW continues
+    from there. ``ci`` sets the nominal central coverage for predictive bands
+    (default 0.95).
+    """
+    n_train = int(state.n_train)
+    n_future = int(n_future)
+    n_total = n_train + n_future
+    n_ci = n_paths_ci if n_paths_ci is not None else max(n_draws, 400)
+    predict_full = state.extend_predict(state.p, n_future)
+    path_anchor = state.path_anchor
+
+    paths_p = sample_warp_paths_future_knots(
+        state.p,
+        n_total,
+        n_train,
+        state.sigma_t,
+        state.n_knots,
+        n_draws,
+        seed,
+        path_anchor=path_anchor,
+    )
+    paths_p_ci = sample_warp_paths_future(
+        state.p,
+        n_total,
+        n_train,
+        state.sigma_t,
+        state.n_knots,
+        n_ci,
+        seed + 1000,
+        path_anchor=path_anchor,
+    )
+    p_det = point_forecast_path(
+        state.p, n_total, path_mode=state.path_mode, path_anchor=path_anchor
+    )
+    preds = np.stack([predict_full(paths_p[k]) for k in range(n_draws)])
+    preds_ci = np.stack([predict_full(paths_p_ci[k]) for k in range(n_ci)])
+    y_point = predict_full(p_det)
+    bands = build_forecast_bands(
+        preds_ci, y_point, state.sigma_y, ci=ci, noise_seed=noise_seed
+    )
+    return {
+        "preds": preds,
+        "preds_ci": preds_ci,
+        "y_point": y_point,
+        "paths_p": paths_p,
+        "paths_p_ci": paths_p_ci,
+        "p_det": p_det,
+        "bands": bands,
+        "ci": float(ci),
+        "n_train": n_train,
+        "n_obs": n_train,
+        "n_total": n_total,
+        "n_future": n_future,
+        "sigma_y": float(state.sigma_y),
+        "sigma_t": float(state.sigma_t),
+        "path_anchor": path_anchor,
+        "terminal_offset": float(state.p[-1] - (n_train - 1)) if state.path_mode == "identity" else float(state.p[-1]),
+        "quantiles": {
+            "q10": bands["t_q_lo"],
+            "q50": bands["t_q50"],
+            "q90": bands["t_q_hi"],
+        },
+    }
+
+
+
+# ---------------------------------------------------------------------------
 # Lynx forecast
 # ---------------------------------------------------------------------------
 
@@ -126,6 +618,12 @@ def sample_warp_paths_future(
     seed: int = 0,
     path_anchor: PathAnchor = DEFAULT_PATH_ANCHOR,
 ) -> np.ndarray:
+    """Per-index future RW, with a terror-scale kick at the free train end.
+
+    Under ``path_anchor='start'`` the MAP train path is kept through
+    ``n_train-2``, the terminal offset gets one N(0, sigma) kick, and the
+    future RW continues from that kicked end (last index not frozen).
+    """
     rng = np.random.default_rng(seed)
     sigma_step = per_year_sigma(sigma_t, n_train, n_knots)
     offset_train = p_train - np.arange(n_train, dtype=np.float64)
@@ -134,13 +632,17 @@ def sample_warp_paths_future(
     for k in range(n_paths):
         off = np.zeros(n_total)
         off[:n_train] = offset_train
+        if path_anchor == "start" and n_train >= 1:
+            off[n_train - 1] = offset_train[n_train - 1] + rng.normal(0.0, sigma_step)
         for i in range(n_train, n_total):
             off[i] = off[i - 1] + rng.normal(0.0, sigma_step)
         paths[k] = idx + off
-        paths[k, :n_train] = p_train
         if path_anchor == "end":
+            paths[k, :n_train] = p_train
             paths[k, n_train - 1] = float(n_train - 1)
         else:
+            if n_train > 1:
+                paths[k, : n_train - 1] = p_train[: n_train - 1]
             paths[k, 0] = 0.0
     return paths
 
@@ -175,8 +677,13 @@ def sample_warp_paths_future_knots(
 ) -> np.ndarray:
     """Future warp paths via knot-level RW + piecewise-linear offset (train knot spacing).
 
-    Used for smooth single-path forecast realisations. Pair with ``sample_warp_paths_future``
-    for per-index RW when building terror/confidence bands.
+    Under ``path_anchor='start'``:
+      1. kick the last train knot by N(0, sigma_knot),
+      2. continue the knot RW from that kicked knot into the future
+         (last train knot is not frozen at the MAP).
+
+    Earlier train knots stay at the MAP. Pair with ``sample_warp_paths_future``
+    for denser per-index RW when building terror/confidence bands.
     """
     rng = np.random.default_rng(seed)
     _, rw_interval = knot_positions(n_train, n_knots)
@@ -187,17 +694,27 @@ def sample_warp_paths_future_knots(
     off_anchor = np.interp(knot_x, idx_train, off_train)
     n_train_knots = len(np.linspace(0.0, float(n_train - 1), n_knots))
     idx_full = np.arange(n_total, dtype=np.float64)
+    # Keep MAP through the second-to-last train knot; last knot may move.
+    freeze_n = int(np.floor(knot_x[max(n_train_knots - 2, 0)])) + 1 if n_train_knots >= 2 else 1
+    freeze_n = min(max(freeze_n, 1), n_train)
     paths = np.zeros((n_paths, n_total), dtype=np.float64)
     for k in range(n_paths):
         off_k = off_anchor.copy()
-        for j in range(n_train_knots, len(knot_x)):
-            off_k[j] = off_k[j - 1] + rng.normal(0.0, sigma_knot)
+        if path_anchor == "start" and n_train_knots >= 1:
+            i_last = n_train_knots - 1
+            off_k[i_last] = off_anchor[i_last] + rng.normal(0.0, sigma_knot)
+            for j in range(n_train_knots, len(knot_x)):
+                off_k[j] = off_k[j - 1] + rng.normal(0.0, sigma_knot)
+        else:
+            for j in range(n_train_knots, len(knot_x)):
+                off_k[j] = off_k[j - 1] + rng.normal(0.0, sigma_knot)
         off_full = np.interp(idx_full, knot_x, off_k)
         paths[k] = idx_full + off_full
-        paths[k, :n_train] = p_train
         if path_anchor == "end":
+            paths[k, :n_train] = p_train
             paths[k, n_train - 1] = float(n_train - 1)
         else:
+            paths[k, :freeze_n] = p_train[:freeze_n]
             paths[k, 0] = 0.0
     return paths
 
@@ -221,30 +738,26 @@ def forecast_lynx_holdout_paths(
     n_paths: int = 500,
     seed: int = 0,
     noise_seed: int = 2,
+    *,
+    ci: float = 0.95,
+    y_train: Optional[np.ndarray] = None,
 ) -> Dict[str, Any]:
-    n_total, n_train = len(z1), split["n_train"]
+    n_total, n_train = len(z1), int(split["n_train"])
     test_idx, train_idx = split["test_idx"], split["train_idx"]
-    p_train = fit["warp"]["p"][:n_train]
-    sigma_t = fit["warp"]["sigma_t"]
-    sigma_y = fit["warp"]["sigma_y"]
-    n_knots = fit["warp"].get("n_knots", 14)
-    paths_p = sample_warp_paths_future(p_train, n_total, n_train, sigma_t, n_knots, n_paths, seed)
-    preds = np.stack([predict_log_from_path(z1, z2, paths_p[k], fit["readout"]) for k in range(n_paths)])
-    p_det = point_forecast_path(p_train, n_total)
-    y_point = predict_log_from_path(z1, z2, p_det, fit["readout"])
-    bands = build_forecast_bands(preds, y_point, sigma_y, noise_seed=noise_seed)
-    q10, q50, q90 = bands["t_q_lo"], bands["t_q50"], bands["t_q_hi"]
-    out = {
-        "paths_p": paths_p,
-        "preds": preds,
-        "y_point": y_point,
-        "n_train": n_train,
-        "n_future": n_total - n_train,
-        "sigma_t": sigma_t,
-        "sigma_y": sigma_y,
-        "bands": bands,
-        "quantiles": {"q10": q10, "q50": q50, "q90": q90},
-    }
+    n_future = n_total - n_train
+    state = as_forecast_state(fit, z1_full=z1, z2_full=z2, n_train=n_train)
+    out = forecast_from_state(
+        state,
+        n_future,
+        n_draws=n_paths,
+        n_paths_ci=n_paths,
+        seed=seed,
+        noise_seed=noise_seed,
+        ci=ci,
+    )
+
+    bands = out["bands"]
+    y_point = out["y_point"]
     y_tr, y_te = fit.get("_y_log_train"), fit.get("_y_log_test")
     if y_tr is not None:
         out["corr_log_train"] = float(np.corrcoef(y_point[train_idx], y_tr)[0, 1])
@@ -253,8 +766,11 @@ def forecast_lynx_holdout_paths(
         out["corr_log_test"] = float(np.corrcoef(y_point[test_idx], y_te)[0, 1])
         out["corr_log_median_test"] = float(np.corrcoef(bands["t_q50"][test_idx], y_te)[0, 1])
         out["rmse_log_test"] = float(np.sqrt(np.mean((y_point[test_idx] - y_te) ** 2)))
-        in_combined = (y_te >= bands["c_q_lo"][test_idx]) & (y_te <= bands["c_q_hi"][test_idx])
-        out["coverage_combined_95_test"] = float(in_combined.mean())
+        out["coverage_combined_test"] = interval_coverage(
+            y_te, bands["c_q_lo"][test_idx], bands["c_q_hi"][test_idx]
+        )
+        out["coverage_combined_95_test"] = out["coverage_combined_test"]  # back-compat
+        out["coverage_nominal"] = float(ci)
     return out
 
 
@@ -265,123 +781,63 @@ def predict_realisations_torch(
     horizon: int = 60,
     seed: int = 0,
 ) -> np.ndarray:
-    """Sample path uncertainty over the first `horizon` time indices."""
-    rng = np.random.default_rng(seed)
-    n = model.n
-    h = min(int(horizon), n)
-    with torch.no_grad():
-        p_fit = model.path().cpu().numpy()
-        sigma_t = float(torch.exp(model.log_sigma_t))
-    sigma_step = per_index_rw_sigma(sigma_t, n, model.n_knots)
-    x_t = x if isinstance(x, torch.Tensor) else torch.tensor(x, dtype=torch.float32)
-    idx = np.arange(n, dtype=np.float64)
-    p_apply_fit = path_for_warp_numpy(p_fit, path_mode=model.path_mode)
-    off_apply_fit = p_apply_fit - idx
-    offset_stored_fit = p_fit - idx
-    paths = np.zeros((n_draws, h))
-    for k in range(n_draws):
-        if model.path_mode == "identity":
-            off_apply = off_apply_fit.copy()
-            for j in range(1, h):
-                off_apply[j] = off_apply[j - 1] + rng.normal(0.0, sigma_step)
-            off_stored = offset_stored_fit.copy()
-            for j in range(h):
-                off_stored[int(n - 1 - j)] = off_apply[j]
-            p = idx + off_stored
-            p[0] = 0.0
-        else:
-            p = p_fit.copy()
-            p_apply = path_for_warp_numpy(p, path_mode=model.path_mode)
-            for j in range(1, h):
-                p_apply[j] = p_apply[j - 1] + rng.normal(0.0, sigma_step)
-            for j in range(h):
-                p[int(n - 1 - j)] = p_apply[j]
-        with torch.no_grad():
-            y_full = model.predict(x_t, torch.tensor(p, dtype=torch.float32)).detach().cpu().numpy()
-        paths[k] = y_full[:h]
-    return paths
+    """Delegate to :func:`warp_regression.readouts.parametric.predict_realisations_torch`."""
+    from .readouts.parametric import predict_realisations_torch as _predict
 
-
-def _synthetic_driver_extended(
-    n_total: int,
-    sine_fit: Optional[Dict[str, Any]] = None,
-) -> np.ndarray:
-    """Extend the warp driver on the synthetic calendar grid ``(i+1)/100``.
-
-    When ``sine_fit`` is supplied (from ``prefit(n_sines=1)``), reuse its fitted
-    ω/phase — or ``z_full`` when long enough — instead of the unwarped template sine.
-    """
-    if sine_fit:
-        z_full = sine_fit.get("z_full")
-        if z_full is not None and len(z_full) >= n_total:
-            return np.asarray(z_full[:n_total], dtype=np.float64)
-        from .readouts.log_trend_sine import sine_from_fit
-
-        t_ext = np.arange(1, n_total + 1, dtype=np.float64) / 100.0
-        return sine_from_fit(t_ext, sine_fit)
-    idx = np.arange(1, n_total + 1, dtype=np.float64)
-    return np.sin(2.0 * np.pi * idx / 100.0)
+    return _predict(model, x, n_draws=n_draws, horizon=horizon, seed=seed)
 
 
 def _predict_forecast_parametric(
     model: WarpParametricModel,
-    x_train: Tensor,
+    x_train: Optional[Tensor],
     n_future: int,
     n_draws: int,
     seed: int,
     noise_seed: int,
-    path_anchor: PathAnchor,
     n_paths_ci: Optional[int] = None,
     sine_fit: Optional[Dict[str, Any]] = None,
+    *,
+    ci: float = 0.95,
+    y_train: Optional[np.ndarray] = None,
+    residual_horizon: Optional[int] = None,
 ) -> Dict[str, Any]:
     n_train = model.n
     n_total = n_train + int(n_future)
-    n_ci = n_paths_ci if n_paths_ci is not None else max(n_draws, 400)
-    with torch.no_grad():
-        p_train = model.path().cpu().numpy()
-        sigma_y = float(torch.exp(model.log_sigma))
-        sigma_t = float(torch.exp(model.log_sigma_t))
-    if sine_fit is not None:
-        x_ext = _synthetic_driver_extended(n_total, sine_fit=sine_fit)
-    elif x_train is not None and len(x_train) >= n_total:
-        x_ext = x_train.detach().cpu().numpy()[:n_total]
-    else:
-        x_ext = _synthetic_driver_extended(n_total)
-    x_t = torch.tensor(x_ext, dtype=torch.float32)
-    paths_p = sample_warp_paths_future_knots(
-        p_train, n_total, n_train, sigma_t, model.n_knots, n_draws, seed, path_anchor=path_anchor
+    x_full = None
+    if x_train is not None and len(x_train) >= n_total:
+        x_full = x_train.detach().cpu().numpy()[:n_total]
+    elif x_train is not None and len(x_train) >= n_train:
+        x_full = _synthetic_driver_extended(n_total + n_train, sine_fit=sine_fit)
+        x_full[:n_train] = x_train.detach().cpu().numpy()[:n_train]
+    state = as_forecast_state(model, x_full=x_full, sine_fit=sine_fit)
+    fc = forecast_from_state(
+        state,
+        int(n_future),
+        n_draws=n_draws,
+        n_paths_ci=n_paths_ci,
+        seed=seed,
+        noise_seed=noise_seed,
+        ci=ci,
     )
-    paths_p_ci = sample_warp_paths_future(
-        p_train, n_total, n_train, sigma_t, model.n_knots, n_ci, seed + 1000, path_anchor=path_anchor
-    )
-    p_det = point_forecast_path(p_train, n_total, path_mode=model.path_mode, path_anchor=path_anchor)
-    preds = np.stack([
-        model.predict(x_t, torch.tensor(paths_p[k], dtype=torch.float32)).detach().cpu().numpy()
-        for k in range(n_draws)
-    ])
-    preds_ci = np.stack([
-        model.predict(x_t, torch.tensor(paths_p_ci[k], dtype=torch.float32)).detach().cpu().numpy()
-        for k in range(n_ci)
-    ])
-    y_point = model.predict(x_t, torch.tensor(p_det, dtype=torch.float32)).detach().cpu().numpy()
-    bands = build_forecast_bands(preds_ci, y_point, sigma_y, noise_seed=noise_seed)
-    return {
-        "preds": preds,
-        "y_point": y_point,
-        "paths_p": paths_p,
-        "paths_p_ci": paths_p_ci,
-        "p_det": p_det,
-        "bands": bands,
-        "n_train": n_train,
-        "n_obs": n_train,
-        "n_total": n_total,
-        "n_future": n_future,
-        "sigma_y": sigma_y,
-        "sigma_t": sigma_t,
-    }
+    # Optional residual MA layer (train residuals → flat future correction).
+    if y_train is not None and residual_horizon is not None:
+        from .residual_smooth import apply_residual_forecast, fit_residual_smooth
+
+        y_hat_tr = state.predict_train(state.p)
+        res_fit = fit_residual_smooth(
+            np.asarray(y_train, dtype=np.float64)[:n_train] - y_hat_tr,
+            horizon=int(residual_horizon),
+        )
+        fc = apply_residual_forecast(fc, res_fit, n_train, fc["sigma_y"], noise_seed=noise_seed)
+    elif hasattr(model, "residual_smooth") and getattr(model, "residual_smooth") is not None:
+        from .residual_smooth import apply_residual_forecast
+
+        fc = apply_residual_forecast(
+            fc, model.residual_smooth, n_train, fc["sigma_y"], noise_seed=noise_seed
+        )
+    return fc
 
 
-@torch.no_grad()
 def predict_forecast_realisations_torch(
     model: Optional[WarpParametricModel] = None,
     x_train: Optional[Tensor] = None,
@@ -392,43 +848,55 @@ def predict_forecast_realisations_torch(
     noise_seed: int = 2,
     path_anchor: PathAnchor = DEFAULT_PATH_ANCHOR,
     *,
+    ci: float = 0.95,
     fit: Optional[Dict[str, Any]] = None,
     sine_fit: Optional[Dict[str, Any]] = None,
     t_idx: Optional[np.ndarray] = None,
     t_norm: Optional[np.ndarray] = None,
     z_full: Optional[np.ndarray] = None,
     n_obs: Optional[int] = None,
+    y_train: Optional[np.ndarray] = None,
+    residual_horizon: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Sample warp-path forecast realisations and 95% terror/error/combined bands.
+    """Sample warp-path forecast realisations and terror/error/combined bands.
 
-    **Synthetic:** pass ``model`` (+ unused ``x_train`` for API compat) and ``n_future``.
-    **Bitcoin:** pass ``fit``, ``t_idx``, ``t_norm``, ``z_full``, ``n_obs`` (``n_future`` optional).
-
-    Single-path draws use knot-level RW + piecewise-linear offset (train knot spacing).
-    Confidence bands use per-index RW paths (``n_paths_ci``, default 400).
+    ``ci`` is the nominal central coverage for percentile bands (default 0.95).
+    Samples from the fitted (start-pinned) path with frozen σ_t/σ_y. When
+    ``sine_fit`` carries ``t0``/``dt``, the prefit sine is evaluated analytically
+    so warp expansion can read known future cycle values. Optionally apply a
+    residual MA layer via ``residual_horizon`` or ``fit['residual_smooth']``.
     """
+    del path_anchor  # path anchor comes from the fitted model/state
     if fit is not None:
         if t_idx is None or t_norm is None or z_full is None or n_obs is None:
             raise ValueError("Bitcoin forecast requires fit, t_idx, t_norm, z_full, n_obs")
-        from .readouts.log_trend_sine import forecast_future
-
         n_total = len(z_full)
         n_future_use = int(n_future) if n_future else n_total - int(n_obs)
-        fc = forecast_future(
+        state = as_forecast_state(
             fit,
-            t_idx,
-            t_norm,
-            z_full,
+            t_idx_full=t_idx,
+            t_norm_full=t_norm,
+            z_full=z_full,
             n_obs=int(n_obs),
-            n_paths=n_draws,
+        )
+        fc = forecast_from_state(
+            state,
+            n_future_use,
+            n_draws=n_draws,
             n_paths_ci=n_paths_ci,
             seed=seed,
+            noise_seed=noise_seed,
+            ci=ci,
         )
-        fc["sigma_t"] = float(fit["warp"]["sigma_t"])
-        fc["sigma_y"] = float(fit["warp"]["sigma_y"])
-        fc["n_train"] = int(n_obs)
-        fc["n_future"] = n_future_use
         res_fit = fit.get("residual_smooth")
+        if res_fit is None and y_train is not None and residual_horizon is not None:
+            from .residual_smooth import fit_residual_smooth
+
+            y_hat_tr = state.predict_train(state.p)
+            res_fit = fit_residual_smooth(
+                np.asarray(y_train, dtype=np.float64)[: int(n_obs)] - y_hat_tr,
+                horizon=int(residual_horizon),
+            )
         if res_fit is not None:
             from .residual_smooth import apply_residual_forecast
 
@@ -444,7 +912,16 @@ def predict_forecast_realisations_torch(
     if model is None:
         raise ValueError("pass model (synthetic) or fit=... (bitcoin)")
     return _predict_forecast_parametric(
-        model, x_train, n_future, n_draws, seed, noise_seed, path_anchor,
-        n_paths_ci=n_paths_ci, sine_fit=sine_fit,
+        model,
+        x_train,
+        n_future,
+        n_draws,
+        seed,
+        noise_seed,
+        n_paths_ci=n_paths_ci,
+        sine_fit=sine_fit,
+        ci=ci,
+        y_train=y_train,
+        residual_horizon=residual_horizon,
     )
 

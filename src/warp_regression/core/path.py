@@ -140,6 +140,66 @@ def path_from_B_torch(
         else:
             p[0] = 0.0
     return p
+
+
+def _B_from_G_numpy(G: np.ndarray) -> np.ndarray:
+    """Invert ``zero_gradient_G_numpy`` (with ``G[0]`` treated as free)."""
+    G = np.asarray(G, dtype=np.float64)
+    B = np.zeros_like(G)
+    cum = 0.0
+    for i in range(len(G)):
+        B[i] = G[i] + cum
+        cum += G[i]
+    return B
+
+
+def path_to_B_numpy(
+    p: np.ndarray,
+    n_knots: int,
+    path_mode: str = "identity",
+    path_anchor: PathAnchor = DEFAULT_PATH_ANCHOR,
+) -> np.ndarray:
+    """Project a stored path onto knot coefficients under the given anchor."""
+    p = np.asarray(p, dtype=np.float64)
+    n = len(p)
+    if path_mode == "identity":
+        offset = p - np.arange(n, dtype=np.float64)
+        if path_anchor == "end":
+            offset_g = offset[::-1].copy()
+            offset_g[0] = 0.0
+        else:
+            offset_g = offset.copy()
+            offset_g[0] = 0.0
+    elif path_mode == "absolute":
+        offset_g = p.copy()
+        offset_g[0] = 0.0
+    else:
+        raise ValueError(path_mode)
+    knot_x, _ = knot_positions(n, n_knots)
+    G = np.interp(knot_x, np.arange(n, dtype=np.float64), offset_g)
+    G[0] = 0.0
+    return _B_from_G_numpy(G)
+
+
+def to_start_anchored_path(
+    p: np.ndarray,
+    path_mode: str = "identity",
+    fit_anchor: PathAnchor = DEFAULT_PATH_ANCHOR,
+) -> np.ndarray:
+    """Warm-start path for prepare: stored == applied, free at the calendar end.
+
+    End-anchored fits already use stored=applied. Legacy reverse-convention
+    start paths are mapped to applied coordinates first. Prepare then rebuilds
+    with ``path_from_B(..., path_anchor='start')`` and soft-warps with
+    ``reverse_path=False`` so future RW stays at the series end.
+    """
+    p = np.asarray(p, dtype=np.float64)
+    if fit_anchor == "start":
+        # Reverse-convention start path → applied coordinates
+        return path_for_warp_numpy(p, path_mode=path_mode)
+    return p.copy()
+
+
 def stored_path_offset_numpy(p: np.ndarray, path_mode: str = "identity") -> np.ndarray:
     p = np.asarray(p, dtype=np.float64)
     if path_mode == "identity":

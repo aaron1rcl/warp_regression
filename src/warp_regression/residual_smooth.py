@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .forecast import build_forecast_bands
+from .forecast import build_forecast_bands, ci_band_params
 
 
 @dataclass
@@ -115,18 +115,21 @@ def apply_residual_forecast(
         fc["preds_ci"] = fc["preds_ci"] + add[np.newaxis, :]
     fc["y_point"] = fc["y_point"] + add
 
+    ci = float(fc.get("ci", 0.95))
+    _, _, z = ci_band_params(ci)
     n_future = n_total - n_obs
-    err_margin = np.full(n_total, 1.96 * float(sigma_y), dtype=np.float64)
+    err_margin = np.full(n_total, z * float(sigma_y), dtype=np.float64)
     if n_future > 0:
         h_arr = np.arange(1, n_future + 1, dtype=np.float64)
         res_std = forecast_residual_std(res_fit, h_arr)
-        err_margin[n_obs:] = 1.96 * np.sqrt(float(sigma_y) ** 2 + res_std ** 2)
+        err_margin[n_obs:] = z * np.sqrt(float(sigma_y) ** 2 + res_std ** 2)
 
     paths_ci = fc.get("preds_ci", fc["preds"])
     fc["bands"] = build_forecast_bands(
         paths_ci,
         fc["y_point"],
         float(sigma_y),
+        ci=ci,
         noise_seed=noise_seed,
         err_margin=err_margin,
     )

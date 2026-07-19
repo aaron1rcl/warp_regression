@@ -2,9 +2,14 @@
 
 from .constants import DEFAULT_PATH_ANCHOR, PathAnchor, NOTEBOOK_LL_TARGET
 from .forecast import (
+    ForecastState,
+    as_forecast_state,
     build_forecast_bands,
+    ci_band_params,
     count_bands_from_log1p_forecast,
+    forecast_from_state,
     forecast_lynx_holdout_paths,
+    interval_coverage,
     log1p_error_band_counts,
     per_index_rw_sigma,
     predict_forecast_realisations_torch,
@@ -107,7 +112,12 @@ __all__ = [
     "WarpReadout",
     "EvalReport",
     "NOTEBOOK_LL_TARGET",
+    "ForecastState",
+    "as_forecast_state",
+    "forecast_from_state",
     "build_forecast_bands",
+    "ci_band_params",
+    "interval_coverage",
     "count_bands_from_log1p_forecast",
     "log1p_error_band_counts",
     "forecast_lynx_holdout_paths",

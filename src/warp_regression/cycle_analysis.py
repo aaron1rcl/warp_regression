@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Literal, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
 
 from .constants import DEFAULT_PATH_ANCHOR, PathAnchor
-from .core.warp import soft_warp_sine_numpy
-from .forecast import sample_warp_paths_future
+from .core.warp import soft_warp_numpy, soft_warp_sine_numpy
+from .drivers.sine import eval_sine_driver
+from .forecast import sample_warp_paths_future, sample_warp_paths_future_knots
 
 
 @dataclass
@@ -31,11 +32,23 @@ def nominal_cycle_length(
     omega: float,
     *,
     time_scale: float = 1.0,
+    dt: Optional[float] = None,
 ) -> float:
-    """Nominal peak-to-peak spacing in index units (no warp noise)."""
+    """Nominal peak-to-peak spacing in index units (no warp noise).
+
+    Prefer ``dt`` (prefit calendar step) when available:
+    ``period = 1 / (ω · time_scale · dt)``.
+    Otherwise fall back to ``n_calendar / (ω · time_scale)``, which assumes the
+    ``soft_warp_sine`` convention ``t = (p+½)/n_calendar``.
+    """
     denom = float(omega) * float(time_scale)
     if denom <= 0:
         raise ValueError("omega * time_scale must be positive")
+    if dt is not None:
+        dt_f = float(dt)
+        if dt_f <= 0:
+            raise ValueError("dt must be positive")
+        return 1.0 / (denom * dt_f)
     return float(n_calendar) / denom
 
 
@@ -46,21 +59,37 @@ def _resolve_sine_params(
     component: str = "primary",
 ) -> Dict[str, float]:
     """Extract sine driver parameters and nominal period from a fit dict."""
+    t0 = sine_fit.get("t0")
+    dt = sine_fit.get("dt")
     if "sine1" in sine_fit:
         key = "sine1" if component != "secondary" else "sine2"
         s = sine_fit[key]
-        mean_len = float(s.get("period_years", n_calendar / float(s["omega"])))
-        return {
-            "omega": float(s["omega"]),
-            "phase": float(s["phase"]),
-            "time_scale": float(s.get("time_scale", 1.0)),
-            "t_shift": float(s.get("t_shift", 0.0)),
-            "mean_cycle_length": mean_len,
+        t0 = s.get("t0", t0)
+        dt = s.get("dt", dt)
+        omega = float(s["omega"])
+        time_scale = float(s.get("time_scale", 1.0))
+        t_shift = float(s.get("t_shift", 0.0))
+        phase = float(s["phase"])
+        if dt is not None:
+            mean_len = nominal_cycle_length(n_calendar, omega, time_scale=time_scale, dt=float(dt))
+        else:
+            mean_len = float(s.get("period_years", n_calendar / omega))
+        out = {
+            "omega": omega,
+            "phase": phase,
+            "time_scale": time_scale,
+            "t_shift": t_shift,
+            "mean_cycle_length": float(mean_len),
         }
+        if t0 is not None:
+            out["t0"] = float(t0)
+        if dt is not None:
+            out["dt"] = float(dt)
+        return out
     if "omega" not in sine_fit:
         raise ValueError("sine_fit must contain omega or sine1/sine2")
     time_scale = float(sine_fit.get("time_scale", 1.0))
-    return {
+    out = {
         "omega": float(sine_fit["omega"]),
         "phase": float(sine_fit["phase"]),
         "time_scale": time_scale,
@@ -69,8 +98,14 @@ def _resolve_sine_params(
             n_calendar,
             float(sine_fit["omega"]),
             time_scale=time_scale,
+            dt=float(dt) if dt is not None else None,
         ),
     }
+    if t0 is not None:
+        out["t0"] = float(t0)
+    if dt is not None:
+        out["dt"] = float(dt)
+    return out
 
 
 def _local_maxima(y: np.ndarray, min_sep: int, *, crest_only: bool = False) -> np.ndarray:
@@ -129,7 +164,26 @@ def _warped_sine_on_path(
     *,
     path_anchor: PathAnchor = DEFAULT_PATH_ANCHOR,
 ) -> np.ndarray:
-    """sin(2πω·time_scale·t + φ) sampled at warped index ``p``."""
+    """Warped sine on path ``p``, matching the prefit calendar when ``dt`` is set.
+
+    With ``t0``/``dt`` from prefit, build ``sin(2πω·time_scale·t+φ)`` on that
+    grid and soft-warp it — same driver the readout was trained on.
+    Without ``dt``, fall back to ``soft_warp_sine`` with ``t=(p+½)/n_calendar``.
+    """
+    p = np.asarray(p, dtype=np.float64)
+    dt = sine_params.get("dt")
+    t0 = sine_params.get("t0")
+    if dt is not None and t0 is not None:
+        n_total = len(p)
+        t = float(t0) + float(dt) * np.arange(n_total, dtype=np.float64)
+        z = eval_sine_driver(
+            t,
+            float(sine_params["omega"]),
+            float(sine_params["phase"]),
+            time_scale=float(sine_params.get("time_scale", 1.0)),
+            t_shift=float(sine_params.get("t_shift", 0.0)),
+        )
+        return soft_warp_numpy(z, p, path_anchor=path_anchor)
     return soft_warp_sine_numpy(
         p,
         n_calendar,
@@ -226,12 +280,17 @@ def sample_next_cycle_lengths(
     seed: int = 0,
     path_anchor: PathAnchor = DEFAULT_PATH_ANCHOR,
     horizon_factor: float = 2.5,
+    path_sampler: Literal["knots", "dense"] = "knots",
 ) -> np.ndarray:
     """Sample next-cycle lengths: warped sine on stochastic warp paths.
 
-    For each path, evaluate ``sin(2πωt+φ)`` at the warped index, locate the
+    For each path, evaluate the prefit sine at the warped index, locate the
     last crest at/before the train end, then the first crest strictly after
     the train end. One peak-to-peak spacing per path.
+
+    Default ``path_sampler="knots"`` uses knot-level RW + piecewise-linear
+    offsets (same smooth realisations as forecast spaghetti). Dense per-index
+    RW creates spurious early crests and downward-biases the length distribution.
     """
     mean_cycle_length = float(sine_params["mean_cycle_length"])
     n_obs = len(p_train)
@@ -239,7 +298,8 @@ def sample_next_cycle_lengths(
     horizon = int(np.ceil(horizon_factor * mean_cycle_length))
     n_total = n_obs + max(horizon, 1)
 
-    paths = sample_warp_paths_future(
+    sampler = sample_warp_paths_future_knots if path_sampler == "knots" else sample_warp_paths_future
+    paths = sampler(
         p_train,
         n_total,
         n_obs,
@@ -277,13 +337,14 @@ def analyze_cycle_lengths(
     path_anchor: PathAnchor = DEFAULT_PATH_ANCHOR,
     unit: str = "index",
     component: str = "primary",
+    path_sampler: Literal["knots", "dense"] = "knots",
 ) -> CycleLengthAnalysis:
     """Infer next-cycle length distribution from fitted σ_t and a sine driver.
 
     Pass a warp **fit** dict (Bitcoin/Lynx) or a fitted **WarpParametricModel**
     (synthetic), plus ``sine_fit`` (or sine fields on ``fit``). Cycle lengths
-    are measured on ``sin(2πωt+φ)`` evaluated at stochastically continued warp
-    paths — no presized driver grids.
+    are measured on the prefit sine evaluated at knot-smooth warp continuations
+    by default — no dense per-index RW (which downward-biases crest spacing).
     """
     p_train, sigma_t, n_obs_use, n_knots_use = _resolve_warp_params(
         fit, model, n_obs=n_obs, n_knots=n_knots
@@ -305,6 +366,7 @@ def analyze_cycle_lengths(
         n_paths=n_paths,
         seed=seed,
         path_anchor=path_anchor,
+        path_sampler=path_sampler,
     )
     return CycleLengthAnalysis(
         lengths=lengths,

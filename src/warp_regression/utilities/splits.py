@@ -49,8 +49,9 @@ def cumsum_path_to_stored_path(
 ) -> np.ndarray:
     """Map discrete cumsum shifts to stored path ``p[i]=i+offset[i]``.
 
-    With ``path_anchor='end'`` (default), offset is pinned at the train end
-    (``offset[n-1]=0``), matching ``path_from_B_*``. With ``'start'``, offset[0]=0.
+    With ``path_anchor='start'`` (default), offset is pinned at the train start
+    (``offset[0]=0``). With ``'end'``, offset is pinned at the train end
+    (``offset[n-1]=0``), matching the old ``path_from_B_*`` convention.
     """
     p_cumsum = np.asarray(p_cumsum, dtype=np.float64)
     n_use = min(int(n), len(p_cumsum))
