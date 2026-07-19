@@ -476,7 +476,7 @@ def _as_forecast_state_bitcoin(
 
 
 def as_forecast_state(
-    source: Union[WarpParametricModel, Dict[str, Any]],
+    source: Union[WarpParametricModel, Dict[str, Any], Any],
     *,
     x_full: Optional[np.ndarray] = None,
     z1_full: Optional[np.ndarray] = None,
@@ -487,8 +487,26 @@ def as_forecast_state(
     n_train: Optional[int] = None,
     n_obs: Optional[int] = None,
     sine_fit: Optional[Dict[str, Any]] = None,
+    covariates_full: Optional[Dict[str, np.ndarray]] = None,
+    calendar_full: Optional[Dict[str, np.ndarray]] = None,
 ) -> ForecastState:
-    """Normalize a parametric model or fit dict into ``ForecastState``."""
+    """Normalize a parametric model, WarpModel, or fit dict into ``ForecastState``."""
+    from .model import WarpModel
+
+    if isinstance(source, WarpModel):
+        return source.as_forecast_state(
+            covariates_full=covariates_full,
+            calendar_full=calendar_full,
+            sine_fit=sine_fit,
+            n_train=n_train,
+            n_obs=n_obs,
+            z1_full=z1_full,
+            z2_full=z2_full,
+            x_full=x_full,
+            t_idx_full=t_idx_full,
+            t_norm_full=t_norm_full,
+            z_full=z_full,
+        )
     if isinstance(source, WarpParametricModel):
         return _as_forecast_state_parametric(source, x_full=x_full, sine_fit=sine_fit)
 

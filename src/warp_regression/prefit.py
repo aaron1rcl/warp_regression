@@ -1,4 +1,4 @@
-"""Periodic driver presize before warp optimization."""
+"""Periodic covariate presize before warp optimization."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from .constants import DEFAULT_PATH_ANCHOR, PathAnchor
-from .drivers.sine import (
+from .covariates.sine import (
     align_sine_to_macro_peaks,
     build_dual_sines_from_fit,
     eval_sine_driver,
@@ -205,10 +205,15 @@ def _prefit_one_sine_peaks(
 @dataclass
 class PrefitResult:
     n_sines: int
-    drivers: Dict[str, np.ndarray] = field(default_factory=dict)
+    covariates: Dict[str, np.ndarray] = field(default_factory=dict)
     sine_fit: Dict[str, Any] = field(default_factory=dict)
     path_ref: Optional[np.ndarray] = None
     meta: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def drivers(self) -> Dict[str, np.ndarray]:
+        """Deprecated alias for ``covariates``."""
+        return self.covariates
 
 
 def prefit(
@@ -216,6 +221,7 @@ def prefit(
     t: np.ndarray,
     *,
     n_sines: int = 1,
+    covariate: Optional[np.ndarray] = None,
     driver: Optional[np.ndarray] = None,
     path_ref: Optional[np.ndarray] = None,
     years: Optional[np.ndarray] = None,
@@ -230,15 +236,17 @@ def prefit(
     **kwargs: Any,
 ) -> PrefitResult:
     n_sines = int(n_sines)
+    if covariate is None:
+        covariate = driver
     if n_sines == 0:
-        if driver is None:
-            raise ValueError("n_sines=0 requires driver=")
-        driver = np.asarray(driver, dtype=np.float64)
+        if covariate is None:
+            raise ValueError("n_sines=0 requires covariate=")
+        covariate = np.asarray(covariate, dtype=np.float64)
         t = np.asarray(t, dtype=np.float64)
-        key = "x" if path_ref is not None else "driver"
+        key = "x" if path_ref is not None else "covariate"
         return PrefitResult(
             n_sines=0,
-            drivers={key: driver},
+            covariates={key: covariate},
             sine_fit={},
             path_ref=path_ref,
             meta=dict(kwargs),
@@ -268,7 +276,7 @@ def prefit(
             )
         return PrefitResult(
             n_sines=1,
-            drivers={"t": t, "z": np.asarray(sine_fit["z"], dtype=np.float64)},
+            covariates={"t": t, "z": np.asarray(sine_fit["z"], dtype=np.float64)},
             sine_fit=sine_fit,
             meta=dict(kwargs),
         )
@@ -280,7 +288,7 @@ def prefit(
         z1, z2 = build_dual_sines_from_fit(t, sine_fit)
         return PrefitResult(
             n_sines=2,
-            drivers={"t": t, "z1": z1, "z2": z2},
+            covariates={"t": t, "z1": z1, "z2": z2},
             sine_fit=sine_fit,
             meta={"years": years, **kwargs},
         )

@@ -1,6 +1,7 @@
 """Unified warp regression package."""
 
-from .constants import DEFAULT_PATH_ANCHOR, PathAnchor, NOTEBOOK_LL_TARGET
+from .block import WarpPath, WarpRegression
+from .constants import DEFAULT_PATH_ANCHOR, NOTEBOOK_LL_TARGET, PathAnchor
 from .forecast import (
     ForecastState,
     as_forecast_state,
@@ -17,6 +18,7 @@ from .forecast import (
     sample_warp_paths_future_knots,
 )
 from .model import FitResult, ForecastResult, WarpModel, WarpModelConfig
+from .observation import ObservationModel
 from .cycle_analysis import (
     CycleLengthAnalysis,
     analyze_cycle_lengths,
@@ -37,26 +39,26 @@ from .prefit import (
     prefit,
     prefit_synthetic_path,
 )
-from .readouts.parametric import EvalReport, WarpParametricModel, evaluate_model
+from .readouts.parametric import EvalReport, WarpParametricModel, evaluate_model, predict_realisations_torch
 from .readouts.dual import (
     fit_dual_sine_shared_warp,
     fit_dual_sine_shared_warp_nonlinear,
 )
 from .readouts.log_trend_sine import (
     WarpReadout,
+    build_forecast_extension,
     fetch_bitcoin_daily,
     fit_log_trend,
     fit_sine_peak_presize,
     fit_warp_model,
     forecast_future,
-    build_forecast_extension,
     log_price,
     normalized_time,
     day_index,
     split_bitcoin_holdout,
     sine_from_fit,
 )
-from .drivers.sine import (
+from .covariates.sine import (
     align_sine_to_macro_peaks,
     build_dual_sines_from_fit,
     fit_dual_sine_log,
@@ -65,6 +67,7 @@ from .drivers.sine import (
     presize_log_trend_sine,
     SineSpec,
     sine_wave,
+    eval_sine_driver,
 )
 from .utilities.datasets import build_synthetic_dataset, prepare_lynx_log, prepare_sunspots
 from .utilities.splits import (
@@ -84,14 +87,16 @@ from .plotting import (
     plot_warp_offset,
 )
 from .core.path import applied_path_offset_numpy, stored_path_offset_numpy, point_forecast_path
-from .readouts.parametric import predict_realisations_torch
 from .core.warp import soft_warp_numpy, soft_warp_sine_numpy
 
 __all__ = [
     "DEFAULT_PATH_ANCHOR",
     "PathAnchor",
+    "WarpPath",
+    "WarpRegression",
     "WarpModel",
     "WarpModelConfig",
+    "ObservationModel",
     "FitResult",
     "ForecastResult",
     "ResidualSmoothFit",
@@ -147,6 +152,7 @@ __all__ = [
     "build_sine_features",
     "SineSpec",
     "sine_wave",
+    "eval_sine_driver",
     "presize_dual_sine",
     "presize_log_trend_sine",
     "plot_realisation_spaghetti",

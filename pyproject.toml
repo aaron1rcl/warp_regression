@@ -13,6 +13,7 @@ dependencies = [
     "pandas>=1.4",
     "torch>=2.0",
     "matplotlib>=3.5",
+    "PyYAML>=6.0",
 ]
 
 [project.optional-dependencies]

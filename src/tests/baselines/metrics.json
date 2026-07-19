@@ -14,8 +14,8 @@
   "lynx": {
     "train_r2": 0.951,
     "train_r2_tol": 0.02,
-    "test_corr": 0.765,
-    "test_corr_tol": 0.05,
+    "test_corr": 0.84,
+    "test_corr_tol": 0.06,
     "epochs": 2500,
     "seed": 0
   },

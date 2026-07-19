@@ -5,7 +5,6 @@ import torch
 
 from warp_regression import (
     WarpModel,
-    WarpModelConfig,
     build_synthetic_dataset,
     split_synthetic_holdout,
 )
@@ -17,25 +16,35 @@ def test_synthetic_holdout(baselines):
     split = split_synthetic_holdout(data["n"], n_train=200)
     train_idx, test_idx = split["train_idx"], split["test_idx"]
 
-    model = WarpModel(
-        WarpModelConfig(
-            readout="parametric",
-            n_knots=8,
-            epochs=cfg_b["epochs"],
-            fit_lambda=cfg_b.get("fit_lambda", 0.5),
-            A_init=cfg_b.get("A_init", 1.0),
-            C_init=cfg_b.get("C_init", 0.0),
-            seed=cfg_b["seed"],
-        )
+    model = WarpModel.from_yaml(
+        "synthetic.yaml",
+        overrides={
+            "train": {
+                "epochs": cfg_b["epochs"],
+                "fit_lambda": cfg_b.get("fit_lambda", 0.5),
+                "seed": cfg_b["seed"],
+            },
+            "observation": {
+                "terms": [
+                    {
+                        "kind": "affine",
+                        "inputs": ["x"],
+                        "A_init": cfg_b.get("A_init", 1.0),
+                        "C_init": cfg_b.get("C_init", 0.0),
+                    }
+                ]
+            },
+        },
     )
-    model.fit(data["y"][train_idx], drivers={"x": data["x"][train_idx]})
+    model.fit(data["y"][train_idx], covariates={"x": data["x"][train_idx]})
 
-    x_train_t = torch.tensor(data["x"], dtype=torch.float32)
+    x_full = data["x"]
     fc = model.forecast(
         len(test_idx),
         n_draws=20,
         seed=cfg_b["seed"],
-        x_train=x_train_t,
+        covariates_full={"x": x_full},
+        x_train=torch.tensor(x_full, dtype=torch.float32),
     )
     y_point = fc.y_point
     y_test = data["y"][test_idx]

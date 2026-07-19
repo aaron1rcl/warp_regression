@@ -1,0 +1,23 @@
+n_knots: 24
+path_anchor: start
+path_mode: identity
+path_groups:
+  shared: {}
+blocks:
+  - id: z1
+    path_group: shared
+    input: z1
+    sample: array
+  - id: z2
+    path_group: shared
+    input: z2
+    sample: array
+observation:
+  terms:
+    - kind: linear_multi
+      inputs: [z1, z2]
+train:
+  epochs: 1500
+  lr: 0.03
+  fit_lambda: 0.5
+  seed: 0

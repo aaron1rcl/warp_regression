@@ -38,7 +38,7 @@ def soft_warp_prefit_sine_numpy(
     if dt is None or t0 is None:
         raise ValueError("soft_warp_prefit_sine_numpy requires sine_fit['t0'] and sine_fit['dt']")
     t = float(t0) + float(dt) * p_use
-    from ..drivers.sine import eval_sine_driver
+    from ..covariates.sine import eval_sine_driver
 
     return eval_sine_driver(
         t,
