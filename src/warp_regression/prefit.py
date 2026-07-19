@@ -132,6 +132,8 @@ def _prefit_one_sine(
         "t_shift": 0.0,
         "presize_corr": best_corr,
         "z": z,
+        "t0": float(t[0]) if len(t) else 0.0,
+        "dt": float(np.median(np.diff(t))) if len(t) > 1 else 1.0,
     }
 
 
@@ -172,6 +174,8 @@ def _prefit_one_sine_peaks(
         "presize_corr": best_corr,
         "time_scale": time_scale,
         "t_shift": t_shift,
+        "t0": float(t[0]) if len(t) else 0.0,
+        "dt": float(np.median(np.diff(t))) if len(t) > 1 else 1.0,
         "peak_k": last_peak_pin.get("peak_k"),
         "n_peaks": len(peak_idx),
         "peak_idx": peak_idx,

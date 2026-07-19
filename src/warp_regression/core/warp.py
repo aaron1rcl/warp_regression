@@ -3,13 +3,74 @@ from __future__ import annotations
 
 
 import math
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 import numpy as np
 import torch
 from torch import Tensor
 
 from ..constants import DEFAULT_PATH_ANCHOR, PathAnchor
 from .path import path_for_warp_numpy, path_for_warp_torch
+
+
+def soft_warp_prefit_sine_numpy(
+    p: np.ndarray,
+    sine_fit: Dict[str, Any],
+    *,
+    reverse_path: Optional[bool] = None,
+    path_mode: str = "identity",
+    path_anchor: PathAnchor = DEFAULT_PATH_ANCHOR,
+) -> np.ndarray:
+    """Evaluate the prefit sine at warped indices using its calendar ``t0``/``dt``.
+
+    Unlike array soft-warp, this has no boundary clamp: expansion past the
+    train window reads known future values of the same analytic sine.
+    ``t = t0 + dt · p`` matches prefit when ``t[i] = t0 + dt·i``.
+    """
+    if reverse_path is None:
+        reverse_path = False
+    p_use = (
+        path_for_warp_numpy(p, path_mode=path_mode)
+        if reverse_path
+        else np.asarray(p, dtype=np.float64)
+    )
+    dt = sine_fit.get("dt")
+    t0 = sine_fit.get("t0")
+    if dt is None or t0 is None:
+        raise ValueError("soft_warp_prefit_sine_numpy requires sine_fit['t0'] and sine_fit['dt']")
+    t = float(t0) + float(dt) * p_use
+    from ..drivers.sine import eval_sine_driver
+
+    return eval_sine_driver(
+        t,
+        float(sine_fit["omega"]),
+        float(sine_fit["phase"]),
+        time_scale=float(sine_fit.get("time_scale", 1.0)),
+        t_shift=float(sine_fit.get("t_shift", 0.0)),
+    )
+
+
+def soft_warp_prefit_sine_torch(
+    p: Tensor,
+    sine_fit: Dict[str, Any],
+    *,
+    reverse_path: Optional[bool] = None,
+    path_mode: str = "identity",
+    path_anchor: PathAnchor = DEFAULT_PATH_ANCHOR,
+) -> Tensor:
+    """Torch version of :func:`soft_warp_prefit_sine_numpy`."""
+    if reverse_path is None:
+        reverse_path = False
+    p_use = path_for_warp_torch(p, path_mode=path_mode) if reverse_path else p
+    dt = sine_fit.get("dt")
+    t0 = sine_fit.get("t0")
+    if dt is None or t0 is None:
+        raise ValueError("soft_warp_prefit_sine_torch requires sine_fit['t0'] and sine_fit['dt']")
+    t = float(t0) + float(dt) * p_use
+    omega = float(sine_fit["omega"])
+    phase = float(sine_fit["phase"])
+    time_scale = float(sine_fit.get("time_scale", 1.0))
+    t_shift = float(sine_fit.get("t_shift", 0.0))
+    return torch.sin(2.0 * math.pi * omega * time_scale * t + phase + t_shift)
 
 
 def soft_warp_numpy(
@@ -20,8 +81,10 @@ def soft_warp_numpy(
     path_anchor: PathAnchor = DEFAULT_PATH_ANCHOR,
 ) -> np.ndarray:
     x = np.asarray(x, dtype=np.float64)
+    # Default: stored path is applied as-is (no reverse). Start-pin leaves the
+    # train end free; end-pin is also stored=applied.
     if reverse_path is None:
-        reverse_path = path_anchor == "start"
+        reverse_path = False
     p_use = (
         path_for_warp_numpy(p, path_mode=path_mode)
         if reverse_path
@@ -49,7 +112,7 @@ def soft_warp_sine_numpy(
 ) -> np.ndarray:
     """Sample sin(2πωt+φ) at warped index p; t=(p+½)/n with no boundary clamp."""
     if reverse_path is None:
-        reverse_path = path_anchor == "start"
+        reverse_path = False
     p_use = (
         path_for_warp_numpy(p, path_mode=path_mode)
         if reverse_path
@@ -72,7 +135,7 @@ def soft_warp_sine_torch(
 ) -> Tensor:
     """Torch sin driver at warped index p; t=(p+½)/n with no boundary clamp."""
     if reverse_path is None:
-        reverse_path = path_anchor == "start"
+        reverse_path = False
     p_use = path_for_warp_torch(p, path_mode=path_mode) if reverse_path else p
     t_warp = (p_use + 0.5) / n
     return torch.sin(
@@ -88,7 +151,7 @@ def soft_warp_torch(
     path_anchor: PathAnchor = DEFAULT_PATH_ANCHOR,
 ) -> Tensor:
     if reverse_path is None:
-        reverse_path = path_anchor == "start"
+        reverse_path = False
     p_use = path_for_warp_torch(p, path_mode=path_mode) if reverse_path else p
     n = x.shape[0]
     p_use = p_use.clamp(0.0, float(n) - 1.001)

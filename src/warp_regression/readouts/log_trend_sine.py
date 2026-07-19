@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
-from ..constants import BITCOIN_CSV, DATA_ROOT, DEFAULT_PATH_ANCHOR
+from ..constants import BITCOIN_CSV, DATA_ROOT, DEFAULT_PATH_ANCHOR, PathAnchor
 from ..core.path import path_from_B_torch, point_forecast_path, stored_path_offset_numpy
 from ..core.training import WarpTrainConfig, train_dual_warp
 from ..core.warp import soft_warp_numpy, soft_warp_sine_numpy, soft_warp_torch
@@ -41,7 +41,7 @@ EPOCHS = 24000
 N_KNOTS = 8
 MLP_HIDDEN = 32
 MLP_LAYERS = 2
-FIT_LAMBDA = 0.9
+FIT_LAMBDA = 0.5
 WARP_LR = 0.2
 
 
@@ -308,6 +308,7 @@ def warped_sine_driver(
     p: np.ndarray,
     sine_fit: Dict[str, Any],
     n_norm: int,
+    path_anchor: PathAnchor = DEFAULT_PATH_ANCHOR,
 ) -> np.ndarray:
     """Apply fitted soft_warp to the presized sine (analytic, no array clamp)."""
     return soft_warp_sine_numpy(
@@ -317,7 +318,7 @@ def warped_sine_driver(
         sine_fit["phase"],
         time_scale=sine_fit.get("time_scale", 1.0),
         t_shift=sine_fit.get("t_shift", 0.0),
-        path_anchor=DEFAULT_PATH_ANCHOR,
+        path_anchor=path_anchor,
     )
 
 
@@ -329,12 +330,13 @@ def predict_components(
     p: np.ndarray,
     sine_fit: Optional[Dict[str, Any]] = None,
     n_norm: Optional[int] = None,
+    path_anchor: PathAnchor = DEFAULT_PATH_ANCHOR,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     if sine_fit is not None:
         n_ref = n_norm if n_norm is not None else len(t_norm)
-        z_w = warped_sine_driver(p, sine_fit, n_ref)
+        z_w = warped_sine_driver(p, sine_fit, n_ref, path_anchor=path_anchor)
     else:
-        z_w = soft_warp_numpy(z, p, path_anchor=DEFAULT_PATH_ANCHOR)
+        z_w = soft_warp_numpy(z, p, path_anchor=path_anchor)
     with torch.no_grad():
         ti = torch.tensor(t_idx, dtype=torch.float32)
         tn = torch.tensor(t_norm, dtype=torch.float32)
@@ -415,6 +417,7 @@ def fit_warp_model(
         "warp": {
             "p": p,
             "B_spline": result["B"].numpy(),
+            "path_anchor": DEFAULT_PATH_ANCHOR,
             "obj_err": w["obj_err"],
             "obj_time": w["obj_time"],
             "sigma_y": w["sigma_y"],
@@ -424,6 +427,7 @@ def fit_warp_model(
         "n_knots": n_knots,
         "epochs": epochs,
         "n_calendar": n_calendar,
+        "_y_train": np.asarray(y, dtype=np.float64),
     }
 
 
@@ -584,7 +588,7 @@ def load_production_fit(
         "cyclic": cyclic,
         "f_t": f_t,
         "atten_t": atten_t,
-        "z_warped": soft_warp_numpy(z, p),
+        "z_warped": soft_warp_numpy(z, p, path_anchor=DEFAULT_PATH_ANCHOR),
         "r2": r2,
         "rmse": rmse,
         "B": float(readout.B.detach()),
@@ -597,6 +601,7 @@ def load_production_fit(
         "warp": {
             "p": p,
             "B_spline": np.asarray(ckpt["B_spline"], dtype=np.float64),
+            "path_anchor": DEFAULT_PATH_ANCHOR,
             "sigma_y": holdout_metrics.get("sigma_y", 0.0),
             "sigma_t": holdout_metrics.get("sigma_t", 0.0),
             "max_abs_offset": float(np.max(np.abs(off))),

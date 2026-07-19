@@ -2,9 +2,14 @@
 
 from .constants import DEFAULT_PATH_ANCHOR, PathAnchor, NOTEBOOK_LL_TARGET
 from .forecast import (
+    ForecastState,
+    as_forecast_state,
     build_forecast_bands,
+    ci_band_params,
     count_bands_from_log1p_forecast,
+    forecast_from_state,
     forecast_lynx_holdout_paths,
+    interval_coverage,
     log1p_error_band_counts,
     per_index_rw_sigma,
     predict_forecast_realisations_torch,
@@ -61,8 +66,13 @@ from .drivers.sine import (
     SineSpec,
     sine_wave,
 )
-from .utilities.datasets import build_synthetic_dataset, prepare_lynx_log
-from .utilities.splits import cumsum_path_to_stored_path, split_lynx_holdout, split_synthetic_holdout
+from .utilities.datasets import build_synthetic_dataset, prepare_lynx_log, prepare_sunspots
+from .utilities.splits import (
+    cumsum_path_to_stored_path,
+    split_holdout_by_year,
+    split_lynx_holdout,
+    split_synthetic_holdout,
+)
 from .utilities.metrics import _r2_rmse
 from .plotting import (
     format_date_axis,
@@ -102,7 +112,12 @@ __all__ = [
     "WarpReadout",
     "EvalReport",
     "NOTEBOOK_LL_TARGET",
+    "ForecastState",
+    "as_forecast_state",
+    "forecast_from_state",
     "build_forecast_bands",
+    "ci_band_params",
+    "interval_coverage",
     "count_bands_from_log1p_forecast",
     "log1p_error_band_counts",
     "forecast_lynx_holdout_paths",
@@ -120,7 +135,9 @@ __all__ = [
     "build_forecast_extension",
     "build_synthetic_dataset",
     "prepare_lynx_log",
+    "prepare_sunspots",
     "split_synthetic_holdout",
+    "split_holdout_by_year",
     "split_lynx_holdout",
     "split_bitcoin_holdout",
     "fetch_bitcoin_daily",

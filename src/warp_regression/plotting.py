@@ -199,12 +199,25 @@ def plot_forecast_bands(
     if x_test is not None and y_test is not None:
         ax.plot(x_test, y_test, "ko", ms=4, alpha=0.6, label=test_label)
 
-    if show_terror:
-        ax.fill_between(x_bands, bands["t_q_lo"], bands["t_q_hi"], color=terror_color, alpha=0.25, label="terror 95% CI")
-    if show_error:
-        ax.fill_between(x_bands, bands["err_lo"], bands["err_hi"], color=error_color, alpha=0.2, label="error 95% CI")
+    ci_pct = int(round(100.0 * float(bands.get("ci", 0.95))))
     if show_combined:
-        ax.fill_between(x_bands, bands["c_q_lo"], bands["c_q_hi"], color=combined_color, alpha=0.18, label="combined 95% CI")
+        ax.fill_between(
+            x_bands, bands["c_q_lo"], bands["c_q_hi"],
+            color=combined_color, alpha=0.28, label=f"total uncertainty {ci_pct}% CI",
+            zorder=0,
+        )
+    if show_terror:
+        ax.fill_between(
+            x_bands, bands["t_q_lo"], bands["t_q_hi"],
+            color=terror_color, alpha=0.35, label=f"time-warp uncertainty {ci_pct}% CI",
+            zorder=1,
+        )
+    if show_error:
+        ax.fill_between(
+            x_bands, bands["err_lo"], bands["err_hi"],
+            color=error_color, alpha=0.2, label=f"error {ci_pct}% CI",
+            zorder=2,
+        )
 
     for x, y, kwargs in point_lines or []:
         ax.plot(x, y, **kwargs)
@@ -236,6 +249,7 @@ def plot_realisation_spaghetti(
     test_label: str = "test (holdout)",
     point_label: str = "point forecast",
     path_color: str = "C0",
+    path_cmap: Optional[str] = None,
     path_alpha: float = 0.12,
     path_lw: float = 0.8,
     forecast_start_x: Optional[Any] = None,
@@ -243,13 +257,23 @@ def plot_realisation_spaghetti(
     xlabel: Optional[str] = None,
     title: Optional[str] = None,
 ) -> plt.Axes:
-    """Many faint sampled realisations plus the point forecast on top."""
+    """Many faint sampled realisations plus the point forecast on top.
+
+    If ``path_cmap`` is set (e.g. ``\"turbo\"``), each realisation gets its own
+    colour from that colormap; otherwise all paths use ``path_color``.
+    """
     if x_obs is not None and y_obs is not None:
         ax.plot(x_obs, y_obs, color="0.75", lw=0.9, label=obs_label)
     if x_test is not None and y_test is not None:
         ax.plot(x_test, y_test, "ko", ms=3, alpha=0.55, label=test_label)
-    for k in range(paths.shape[0]):
-        ax.plot(x, paths[k], color=path_color, alpha=path_alpha, lw=path_lw)
+    n_paths = int(paths.shape[0])
+    if path_cmap is not None and n_paths > 0:
+        cmap = plt.get_cmap(path_cmap)
+        colors = [cmap(k / max(n_paths - 1, 1)) for k in range(n_paths)]
+    else:
+        colors = [path_color] * n_paths
+    for k in range(n_paths):
+        ax.plot(x, paths[k], color=colors[k], alpha=path_alpha, lw=path_lw)
     ax.plot(x_point, y_point, color="black", lw=2, label=point_label)
     if forecast_start_x is not None:
         ax.axvline(forecast_start_x, color="0.5", ls="--", lw=0.8)

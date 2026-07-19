@@ -303,9 +303,15 @@ def fit_dual_sine_log(
     y_hat = X @ coef
     ss_res = float(np.sum((y_log - y_hat) ** 2))
     ss_tot = float(np.sum((y_log - y_log.mean()) ** 2)) + 1e-12
+    t_arr = np.asarray(t, dtype=np.float64)
+    dt = float(np.median(np.diff(t_arr))) if len(t_arr) > 1 else 1.0
+    t0 = float(t_arr[0]) if len(t_arr) else 0.0
+    # Index-unit periods from the prefit calendar step (years when dt is year-scaled).
+    period1 = 1.0 / (om1 * dt)
+    period2 = 1.0 / (om2 * dt)
     return {
-        "sine1": {"omega": om1, "phase": ph1, "amplitude": float(a1), "period_years": len(y_log) / om1},
-        "sine2": {"omega": om2, "phase": ph2, "amplitude": float(a2), "peak_alignment": best_score, "period_years": len(y_log) / om2},
+        "sine1": {"omega": om1, "phase": ph1, "amplitude": float(a1), "period_years": period1},
+        "sine2": {"omega": om2, "phase": ph2, "amplitude": float(a2), "peak_alignment": best_score, "period_years": period2},
         "intercept": float(b),
         "z1": z1,
         "z2": z2,
@@ -317,6 +323,8 @@ def fit_dual_sine_log(
         "big_peak_idx": big_peak_idx,
         "big_peak_years": years[big_peak_idx],
         "z2_peak_idx": z2_peak_idx,
+        "t0": t0,
+        "dt": dt,
     }
 
 

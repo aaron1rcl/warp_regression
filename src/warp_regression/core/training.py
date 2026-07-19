@@ -197,3 +197,98 @@ def train_dual_warp(
         "config": config,
     }
 
+
+def refit_warp_path(
+    y: Tensor,
+    forward_fn: Callable[[Tensor], Tuple[Tensor, Tensor]],
+    *,
+    sigma_y: float,
+    sigma_t: float,
+    n_knots: int,
+    B_init: Tensor,
+    sample_weights: Optional[Tensor] = None,
+    extra_params: Optional[Iterable[Tensor]] = None,
+    epochs: int = 400,
+    lr: float = 0.03,
+    fit_lambda: float = 0.5,
+    path_mode: str = "identity",
+    seed: int = 0,
+) -> Dict[str, Any]:
+    """Refit warp knots (and optional extra params) with frozen σ_y / σ_t.
+
+    ``forward_fn(B) -> (y_hat, p)`` should emit a start-anchored path.
+    ``extra_params`` may include trend readout weights (e.g. bitcoin ``B``, ``C``);
+    MLP / cyclic readout pieces should stay frozen by omitting them here.
+    """
+    torch.manual_seed(seed)
+    B = nn.Parameter(B_init.detach().float().clone())
+    log_sigma = torch.tensor(float(np.log(max(sigma_y, 1e-12))), dtype=torch.float32)
+    log_sigma_t = torch.tensor(float(np.log(max(sigma_t, 1e-12))), dtype=torch.float32)
+    extra_list = list(extra_params) if extra_params else []
+    params: List[Tensor] = [B, *extra_list]
+    opt = torch.optim.Adam(params, lr=lr)
+    history: List[DualLossValues] = []
+    best: Dict[str, Any] = {}
+    best_loss = float("inf")
+    p_init: Optional[np.ndarray] = None
+
+    with torch.no_grad():
+        y_hat0, p0 = forward_fn(B.detach())
+        p_init = p0.detach().cpu().numpy().copy()
+
+    for ep in range(epochs):
+        opt.zero_grad()
+        lam = _lambda_schedule(ep, epochs, fit_lambda)
+        y_hat, p = forward_fn(B)
+        loss, vals = compute_dual_loss(
+            y,
+            y_hat,
+            p,
+            log_sigma,
+            log_sigma_t,
+            n_knots,
+            lam,
+            path_mode=path_mode,
+            sample_weights=sample_weights,
+        )
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(params, max_norm=5.0)
+        opt.step()
+        history.append(vals)
+        if float(loss.detach()) < best_loss:
+            best_loss = float(loss.detach())
+            with torch.no_grad():
+                y_hat_b, p_b = forward_fn(B)
+            best = {
+                "B": B.detach().cpu().clone(),
+                "p": p_b.detach().cpu().numpy(),
+                "y_hat": y_hat_b.detach().cpu().numpy(),
+                "extra": [p.detach().cpu().clone() for p in extra_list],
+                **vals.__dict__,
+            }
+
+    # Restore best path knots and any extra params (trend) in-place.
+    with torch.no_grad():
+        B.copy_(best["B"].to(device=B.device, dtype=B.dtype))
+        for param, saved in zip(extra_list, best.get("extra", [])):
+            param.copy_(saved.to(device=param.device, dtype=param.dtype))
+        y_hat_b, p_b = forward_fn(B)
+    p_best = p_b.detach().cpu().numpy()
+    idx = np.arange(len(p_best), dtype=np.float64)
+    terminal_offset = float(p_best[-1] - idx[-1]) if len(p_best) else 0.0
+    path_delta = float(np.max(np.abs(p_best - p_init))) if p_init is not None else 0.0
+    return {
+        "B": best["B"],
+        "p": p_best,
+        "y_hat": y_hat_b.detach().cpu().numpy(),
+        "sigma_y": float(sigma_y),
+        "sigma_t": float(sigma_t),
+        "obj_err": best["obj_err"],
+        "obj_time": best["obj_time"],
+        "terminal_offset": terminal_offset,
+        "path_delta": path_delta,
+        "epochs": int(epochs),
+        "history": history,
+        "p_init": p_init,
+    }
+

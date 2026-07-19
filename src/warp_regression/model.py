@@ -10,7 +10,11 @@ import torch
 from torch import Tensor
 
 from .constants import DEFAULT_PATH_ANCHOR, PathAnchor
-from .forecast import predict_forecast_realisations_torch
+from .forecast import (
+    ForecastState,
+    as_forecast_state,
+    predict_forecast_realisations_torch,
+)
 from .prefit import LogTrendAnalysis, PrefitResult, analyze_log_trend, prefit, prefit_synthetic_path
 from .readouts.dual import fit_dual_sine_shared_warp, fit_dual_sine_shared_warp_nonlinear
 from .residual_smooth import ResidualSmoothFit, fit_residual_smooth
@@ -70,6 +74,7 @@ class WarpModel:
         self._parametric: Optional[WarpParametricModel] = None
         self._drivers: Dict[str, Any] = {}
         self._calendar: Dict[str, Any] = {}
+        self._y: Optional[np.ndarray] = None
 
     @property
     def prefit_result(self) -> Optional[PrefitResult]:
@@ -147,6 +152,8 @@ class WarpModel:
     ) -> FitResult:
         cfg = self.config
         y = np.asarray(y, dtype=np.float64)
+        self._y = y
+        self._prepared = None
         drivers = drivers or {}
 
         if cfg.readout == "parametric":
@@ -162,9 +169,11 @@ class WarpModel:
                 A_init=cfg.A_init,
                 C_init=cfg.C_init,
                 path_mode=cfg.path_mode,
+                path_anchor=cfg.path_anchor,
             )
             model.fit(x_t, y_t, epochs=cfg.epochs, lr=cfg.lr, seed=cfg.seed, fit_lambda=cfg.fit_lambda)
             self._parametric = model
+            self._drivers = {"x": np.asarray(x, dtype=np.float64)}
             with torch.no_grad():
                 y_hat = model.predict(x_t).detach().cpu().numpy()
             r2, rmse = _r2_rmse(y, y_hat)
@@ -194,7 +203,8 @@ class WarpModel:
                     hidden=cfg.mlp_hidden, n_hidden_layers=cfg.mlp_layers,
                     lr=cfg.lr, fit_lambda=cfg.fit_lambda, seed=cfg.seed, sine_fit=sine_fit,
                 )
-            self._fit = {**fit, "kind": cfg.readout}
+            self._fit = {**fit, "kind": cfg.readout, "_y_log_train": y, "n_knots": cfg.n_knots}
+            self._fit["warp"] = {**self._fit["warp"], "n_knots": cfg.n_knots}
             self._drivers = {"t": t, "z1": z1, "z2": z2}
             self._calendar = {"n_train": len(y)}
             y_hat = fit["y_hat_log"]
@@ -211,7 +221,7 @@ class WarpModel:
                 fit_lambda=cfg.fit_lambda, mlp_hidden=cfg.mlp_hidden,
                 mlp_layers=cfg.mlp_layers, seed=cfg.seed,
             )
-            self._fit = {**fit, "kind": "log_trend_sine"}
+            self._fit = {**fit, "kind": "log_trend_sine", "_y_train": y}
             if cfg.residual_smooth_horizon is not None:
                 res_fit = fit_residual_smooth(y - fit["y_hat"], horizon=cfg.residual_smooth_horizon)
                 self._fit["residual_smooth"] = res_fit
@@ -220,6 +230,47 @@ class WarpModel:
             return FitResult(y_hat=fit["y_hat"], r2=fit["r2"], rmse=fit["rmse"], fit=self._fit)
 
         raise ValueError(f"unknown readout: {cfg.readout}")
+
+    def as_forecast_state(
+        self,
+        *,
+        z1_full: Optional[np.ndarray] = None,
+        z2_full: Optional[np.ndarray] = None,
+        x_full: Optional[np.ndarray] = None,
+        t_idx_full: Optional[np.ndarray] = None,
+        t_norm_full: Optional[np.ndarray] = None,
+        z_full: Optional[np.ndarray] = None,
+        n_obs: Optional[int] = None,
+        sine_fit: Optional[Dict[str, Any]] = None,
+    ) -> ForecastState:
+        if not self.is_fitted:
+            raise RuntimeError("model not fitted")
+        if self._parametric is not None:
+            return as_forecast_state(
+                self._parametric,
+                x_full=x_full if x_full is not None else self._drivers.get("x"),
+                sine_fit=sine_fit,
+            )
+        cfg = self.config
+        if cfg.readout in ("dual_linear", "dual_mlp"):
+            z1 = z1_full if z1_full is not None else self._drivers.get("z1")
+            z2 = z2_full if z2_full is not None else self._drivers.get("z2")
+            if z1 is None or z2 is None:
+                raise ValueError("dual prepare/forecast needs z1_full/z2_full")
+            n_tr = len(self._y) if self._y is not None else len(z1)
+            return as_forecast_state(self._fit, z1_full=z1, z2_full=z2, n_train=n_tr)
+        if cfg.readout == "log_trend_sine":
+            if t_idx_full is None or t_norm_full is None or z_full is None:
+                raise ValueError("log_trend_sine prepare/forecast needs t_idx_full, t_norm_full, z_full")
+            n_tr = len(self._y) if self._y is not None else int(n_obs or 0)
+            return as_forecast_state(
+                self._fit,
+                t_idx_full=t_idx_full,
+                t_norm_full=t_norm_full,
+                z_full=z_full,
+                n_obs=n_obs if n_obs is not None else n_tr,
+            )
+        raise ValueError(f"as_forecast_state not supported for {cfg.readout}")
 
     def predict(self, drivers: Optional[Dict[str, np.ndarray]] = None, p: Optional[np.ndarray] = None) -> np.ndarray:
         if not self.is_fitted:
@@ -236,7 +287,7 @@ class WarpModel:
 
     def forecast(
         self,
-        n_future: int,
+        n_future: Optional[int] = None,
         *,
         n_draws: int = 20,
         n_paths_ci: Optional[int] = None,
@@ -247,10 +298,17 @@ class WarpModel:
         z_full: Optional[np.ndarray] = None,
         n_obs: Optional[int] = None,
         x_train: Optional[Tensor] = None,
+        z1_full: Optional[np.ndarray] = None,
+        z2_full: Optional[np.ndarray] = None,
+        sine_fit: Optional[Dict[str, Any]] = None,
+        residual_horizon: Optional[int] = None,
     ) -> ForecastResult:
         if not self.is_fitted:
             raise RuntimeError("model not fitted")
+        if n_future is None:
+            raise ValueError("n_future required")
         cfg = self.config
+        res_h = residual_horizon if residual_horizon is not None else cfg.residual_smooth_horizon
 
         if self._parametric is not None:
             fc = predict_forecast_realisations_torch(
@@ -261,7 +319,9 @@ class WarpModel:
                 n_paths_ci=n_paths_ci,
                 seed=seed,
                 noise_seed=noise_seed,
-                path_anchor=cfg.path_anchor,
+                sine_fit=sine_fit if sine_fit is not None else self._prefit.sine_fit if self._prefit else None,
+                y_train=self._y,
+                residual_horizon=res_h,
             )
         elif cfg.readout == "log_trend_sine":
             if t_idx is None or t_norm is None or z_full is None or n_obs is None:
@@ -272,35 +332,36 @@ class WarpModel:
                 t_norm=t_norm,
                 z_full=z_full,
                 n_obs=n_obs,
-                n_future=n_future,
+                n_future=n_future or 0,
                 n_draws=n_draws,
                 n_paths_ci=n_paths_ci,
                 seed=seed,
                 noise_seed=noise_seed,
+                y_train=self._y,
+                residual_horizon=res_h,
             )
         elif cfg.readout in ("dual_linear", "dual_mlp"):
             from .forecast import forecast_lynx_holdout_paths
 
-            z1 = self._drivers["z1"]
-            z2 = self._drivers["z2"]
+            z1 = z1_full if z1_full is not None else self._drivers["z1"]
+            z2 = z2_full if z2_full is not None else self._drivers["z2"]
             n_train = len(self._fit["warp"]["p"])
-            n_total = n_train + int(n_future)
+            n_fut = int(n_future or 0)
+            n_total = n_train + n_fut
             split = self._calendar.get("split") or {
                 "n_train": n_train,
                 "test_idx": np.arange(n_train, n_total, dtype=int),
                 "train_idx": np.arange(n_train, dtype=int),
             }
-            p_full = np.arange(n_total, dtype=np.float64)
-            p_full[:n_train] = self._fit["warp"]["p"]
-            fit_ext = {**self._fit, "warp": {**self._fit["warp"], "p": p_full, "n_knots": self.config.n_knots}}
             fc = forecast_lynx_holdout_paths(
-                fit_ext,
+                self._fit,
                 z1[:n_total],
                 z2[:n_total],
                 split,
                 n_paths=n_draws,
                 seed=seed,
                 noise_seed=noise_seed,
+                y_train=self._y,
             )
         else:
             raise ValueError(f"forecast not supported for {cfg.readout}")
@@ -312,6 +373,6 @@ class WarpModel:
             sigma_t=float(fc.get("sigma_t", self._fit.get("warp", {}).get("sigma_t", 0))),
             sigma_y=float(fc.get("sigma_y", self._fit.get("warp", {}).get("sigma_y", 0))),
             n_train=int(fc.get("n_train", fc.get("n_obs", n_obs or 0))),
-            n_future=int(fc.get("n_future", n_future)),
+            n_future=int(fc.get("n_future", n_future or 0)),
             raw=fc,
         )

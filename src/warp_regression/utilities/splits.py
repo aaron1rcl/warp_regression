@@ -7,7 +7,8 @@ import pandas as pd
 
 from ..constants import DEFAULT_PATH_ANCHOR, PathAnchor
 
-def split_lynx_holdout(data: Dict[str, Any], train_end_year: int = 1910) -> Dict[str, Any]:
+def split_holdout_by_year(data: Dict[str, Any], train_end_year: float) -> Dict[str, Any]:
+    """Train/test split on any series with a ``years`` field (integer or decimal)."""
     years = data["years"]
     train_mask = years <= train_end_year
     train_idx = np.where(train_mask)[0]
@@ -21,6 +22,10 @@ def split_lynx_holdout(data: Dict[str, Any], train_end_year: int = 1910) -> Dict
         "years_train": years[train_mask],
         "years_test": years[~train_mask],
     }
+
+
+def split_lynx_holdout(data: Dict[str, Any], train_end_year: int = 1910) -> Dict[str, Any]:
+    return split_holdout_by_year(data, train_end_year)
 
 
 def split_synthetic_holdout(n: int, n_train: int = 200) -> Dict[str, Any]:
@@ -44,8 +49,9 @@ def cumsum_path_to_stored_path(
 ) -> np.ndarray:
     """Map discrete cumsum shifts to stored path ``p[i]=i+offset[i]``.
 
-    With ``path_anchor='end'`` (default), offset is pinned at the train end
-    (``offset[n-1]=0``), matching ``path_from_B_*``. With ``'start'``, offset[0]=0.
+    With ``path_anchor='start'`` (default), offset is pinned at the train start
+    (``offset[0]=0``). With ``'end'``, offset is pinned at the train end
+    (``offset[n-1]=0``), matching the old ``path_from_B_*`` convention.
     """
     p_cumsum = np.asarray(p_cumsum, dtype=np.float64)
     n_use = min(int(n), len(p_cumsum))
