@@ -124,13 +124,13 @@ For YAML models, dual loss, and forecast bands, see the notebooks and `WarpModel
 
 ## Examples
 
-| Notebook | Setting |
-|----------|---------|
-| [`0_Warp_Block_Basics.ipynb`](examples/notebooks/0_Warp_Block_Basics.ipynb) | Synthetic: warp layer, error-only vs dual loss |
-| [`1_Introduction_to_Warp_Regression.ipynb`](examples/notebooks/1_Introduction_to_Warp_Regression.ipynb) | Synthetic sine + `WarpModel` + forecast bands |
-| [`2_Adding_complexity_Lynx_Forecast.ipynb`](examples/notebooks/2_Adding_complexity_Lynx_Forecast.ipynb) | Hudson Bay lynx (dual sines, shared warp) |
-| [`3_Bitcoin_Warp.ipynb`](examples/notebooks/3_Bitcoin_Warp.ipynb) | Daily BTC log-price |
-| [`4_Fully_Bayesian.ipynb`](examples/notebooks/4_Fully_Bayesian.ipynb) | Full-series PyMC + JAX dual posterior (λ=0.5) |
+| Notebook | What it covers |
+|----------|----------------|
+| [`0_Warp_Block_Basics.ipynb`](examples/notebooks/0_Warp_Block_Basics.ipynb) | Portable `WarpPath` / `WarpRegression` block; error-only vs dual loss on a known warp |
+| [`1_Introduction_to_Warp_Regression.ipynb`](examples/notebooks/1_Introduction_to_Warp_Regression.ipynb) | End-to-end `WarpModel` on synthetic sine: prefit, dual fit, path recovery, forecast bands |
+| [`2_Adding_complexity_Lynx_Forecast.ipynb`](examples/notebooks/2_Adding_complexity_Lynx_Forecast.ipynb) | Hudson Bay lynx: two sines, one shared warp, nonlinear readout, holdout forecast |
+| [`3_Bitcoin_Warp.ipynb`](examples/notebooks/3_Bitcoin_Warp.ipynb) | Daily BTC log-price: log-trend + envelope sine, cycle timing, out-of-sample bands |
+| [`4_Fully_Bayesian.ipynb`](examples/notebooks/4_Fully_Bayesian.ipynb) | Fully Bayesian dual model (PyMC + JAX / NumPyro): posteriors on $A$, $C$, path, and scales |
 
 HTML under [`examples/html/`](examples/html/). Configs in [`examples/models/`](examples/models/).
 
