@@ -1,1 +1,0 @@
-"""Sine and array drivers."""

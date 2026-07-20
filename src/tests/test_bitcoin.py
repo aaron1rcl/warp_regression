@@ -4,22 +4,21 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from warp_regression import (
-    WarpModel,
-    WarpModelConfig,
+from utils import (
     day_index,
     fetch_bitcoin_daily,
     fit_log_trend,
     fit_sine_peak_presize,
     log_price,
     normalized_time,
+    sine_from_fit,
     split_bitcoin_holdout,
 )
-from warp_regression.readouts.log_trend_sine import _sine_from_fit
+from warp_regression import WarpModel
 
 
 def _build_z_full(t: np.ndarray, sine_fit: dict) -> np.ndarray:
-    return _sine_from_fit(t, sine_fit)
+    return sine_from_fit(t, sine_fit)
 
 
 @pytest.mark.slow
@@ -53,25 +52,27 @@ def _run_bitcoin_holdout(cfg, corr_tol=None, rmse_tol=None, return_metrics=False
     t_tr = t[train_idx]
     dates_tr = dates[train_idx]
 
-    B, C, z, trend, _ = fit_log_trend(y_tr, t_idx_tr)
+    _, _, _, trend, _ = fit_log_trend(y_tr, t_idx_tr)
     residual = y_tr - trend
     sine_fit = fit_sine_peak_presize(residual, y_tr, t_tr, dates_tr)
     z_full = _build_z_full(t, sine_fit)
 
-    model = WarpModel(
-        WarpModelConfig(
-            readout="log_trend_sine",
-            n_knots=cfg["n_knots"],
-            epochs=cfg["epochs"],
-            fit_lambda=cfg["fit_lambda"],
-            lr=0.2,
-            seed=cfg["seed"],
-        )
+    model = WarpModel.from_yaml(
+        "bitcoin.yaml",
+        overrides={
+            "train": {
+                "epochs": cfg["epochs"],
+                "fit_lambda": cfg["fit_lambda"],
+                "lr": 0.2,
+                "seed": cfg["seed"],
+            },
+            "n_knots": cfg["n_knots"],
+        },
     )
     model.fit(
         y_tr,
-        t_idx=t_idx_tr,
-        t_norm=t_tr,
+        covariates={"z": z_full[:n_train]},
+        calendar={"t_idx": t_idx_tr, "t_norm": t_tr},
         sine_fit={**sine_fit, "z": z_full[:n_train]},
     )
 
@@ -83,14 +84,15 @@ def _run_bitcoin_holdout(cfg, corr_tol=None, rmse_tol=None, return_metrics=False
         t_norm=t,
         z_full=z_full,
         n_obs=n_train,
+        covariates_full={"z": z_full},
+        calendar_full={"t_idx": t_idx, "t_norm": t},
+        sine_fit=sine_fit,
     )
-    y_point = fc.y_point
+    y_hat = fc.y_point[test_idx]
     y_te = y[test_idx]
-    corr = float(np.corrcoef(y_point[test_idx], y_te)[0, 1])
-    rmse = float(np.sqrt(np.mean((y_point[test_idx] - y_te) ** 2)))
-
+    corr = float(np.corrcoef(y_hat, y_te)[0, 1])
+    rmse = float(np.sqrt(np.mean((y_hat - y_te) ** 2)))
     if return_metrics:
         return corr, rmse
-
-    assert abs(corr - cfg["test_corr"]) <= corr_tol, f"test corr={corr:.3f}"
-    assert abs(rmse - cfg["test_rmse"]) <= rmse_tol, f"test rmse={rmse:.3f}"
+    assert abs(corr - cfg["test_corr"]) <= corr_tol, f"corr={corr:.3f}"
+    assert abs(rmse - cfg["test_rmse"]) <= rmse_tol, f"rmse={rmse:.3f}"

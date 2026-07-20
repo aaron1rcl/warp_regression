@@ -1,102 +1,59 @@
-"""Warp regression module."""
+"""Soft-warp: resample a signal (or analytic sine) at fractional path indices.
+
+Three operations, each in numpy (forecast / plots) and torch (training):
+
+* ``soft_warp`` — linear interpolate an array ``x`` at indices ``p``
+* ``soft_warp_sine`` — evaluate ``sin(2π ω t + φ)`` at ``t = (p+½)/n``
+* ``soft_warp_prefit_sine`` — same sine on the prefit calendar ``t = t0 + dt·p``
+
+The stored path ``p`` is applied as-is (start-pinned training leaves the
+train end free). There is no reverse-path mapping anymore.
+"""
+
 from __future__ import annotations
 
-
 import math
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
+
 import numpy as np
 import torch
 from torch import Tensor
 
-from ..constants import DEFAULT_PATH_ANCHOR, PathAnchor
-from .path import path_for_warp_numpy, path_for_warp_torch
+
+# ---------------------------------------------------------------------------
+# Array soft-warp (linear interpolation of a discrete driver)
+# ---------------------------------------------------------------------------
 
 
-def soft_warp_prefit_sine_numpy(
-    p: np.ndarray,
-    sine_fit: Dict[str, Any],
-    *,
-    reverse_path: Optional[bool] = None,
-    path_mode: str = "identity",
-    path_anchor: PathAnchor = DEFAULT_PATH_ANCHOR,
-) -> np.ndarray:
-    """Evaluate the prefit sine at warped indices using its calendar ``t0``/``dt``.
+def soft_warp_numpy(x: np.ndarray, p: np.ndarray) -> np.ndarray:
+    """``x`` sampled at fractional indices ``p``.
 
-    Unlike array soft-warp, this has no boundary clamp: expansion past the
-    train window reads known future values of the same analytic sine.
-    ``t = t0 + dt · p`` matches prefit when ``t[i] = t0 + dt·i``.
+    Clamp to ``[0, n-1.001]`` so floor(p) never hits the last index alone
+    (avoids a zero-width interpolation segment at the right edge).
     """
-    if reverse_path is None:
-        reverse_path = False
-    p_use = (
-        path_for_warp_numpy(p, path_mode=path_mode)
-        if reverse_path
-        else np.asarray(p, dtype=np.float64)
-    )
-    dt = sine_fit.get("dt")
-    t0 = sine_fit.get("t0")
-    if dt is None or t0 is None:
-        raise ValueError("soft_warp_prefit_sine_numpy requires sine_fit['t0'] and sine_fit['dt']")
-    t = float(t0) + float(dt) * p_use
-    from ..drivers.sine import eval_sine_driver
-
-    return eval_sine_driver(
-        t,
-        float(sine_fit["omega"]),
-        float(sine_fit["phase"]),
-        time_scale=float(sine_fit.get("time_scale", 1.0)),
-        t_shift=float(sine_fit.get("t_shift", 0.0)),
-    )
-
-
-def soft_warp_prefit_sine_torch(
-    p: Tensor,
-    sine_fit: Dict[str, Any],
-    *,
-    reverse_path: Optional[bool] = None,
-    path_mode: str = "identity",
-    path_anchor: PathAnchor = DEFAULT_PATH_ANCHOR,
-) -> Tensor:
-    """Torch version of :func:`soft_warp_prefit_sine_numpy`."""
-    if reverse_path is None:
-        reverse_path = False
-    p_use = path_for_warp_torch(p, path_mode=path_mode) if reverse_path else p
-    dt = sine_fit.get("dt")
-    t0 = sine_fit.get("t0")
-    if dt is None or t0 is None:
-        raise ValueError("soft_warp_prefit_sine_torch requires sine_fit['t0'] and sine_fit['dt']")
-    t = float(t0) + float(dt) * p_use
-    omega = float(sine_fit["omega"])
-    phase = float(sine_fit["phase"])
-    time_scale = float(sine_fit.get("time_scale", 1.0))
-    t_shift = float(sine_fit.get("t_shift", 0.0))
-    return torch.sin(2.0 * math.pi * omega * time_scale * t + phase + t_shift)
-
-
-def soft_warp_numpy(
-    x: np.ndarray,
-    p: np.ndarray,
-    reverse_path: Optional[bool] = None,
-    path_mode: str = "identity",
-    path_anchor: PathAnchor = DEFAULT_PATH_ANCHOR,
-) -> np.ndarray:
     x = np.asarray(x, dtype=np.float64)
-    # Default: stored path is applied as-is (no reverse). Start-pin leaves the
-    # train end free; end-pin is also stored=applied.
-    if reverse_path is None:
-        reverse_path = False
-    p_use = (
-        path_for_warp_numpy(p, path_mode=path_mode)
-        if reverse_path
-        else np.asarray(p, dtype=np.float64)
-    )
+    p = np.asarray(p, dtype=np.float64)
     n = len(x)
-    # Keep indices in range for generic (non-periodic) drivers; see soft_warp_sine_* for sin.
-    p_use = np.clip(p_use, 0.0, n - 1.001)
-    i0 = np.floor(p_use).astype(int)
+    p = np.clip(p, 0.0, n - 1.001)
+    i0 = np.floor(p).astype(int)
     i1 = np.minimum(i0 + 1, n - 1)
-    w = p_use - i0
+    w = p - i0
     return (1.0 - w) * x[i0] + w * x[i1]
+
+
+def soft_warp_torch(x: Tensor, p: Tensor) -> Tensor:
+    """Torch version of :func:`soft_warp_numpy`."""
+    n = x.shape[0]
+    p = p.clamp(0.0, float(n) - 1.001)
+    i0 = torch.floor(p).long().clamp(0, n - 2)
+    i1 = i0 + 1
+    w = p - i0.to(p.dtype)
+    return (1.0 - w) * x[i0] + w * x[i1]
+
+
+# ---------------------------------------------------------------------------
+# Analytic sine at warped index  (t = (p + ½) / n)
+# ---------------------------------------------------------------------------
 
 
 def soft_warp_sine_numpy(
@@ -106,20 +63,15 @@ def soft_warp_sine_numpy(
     phase: float,
     time_scale: float = 1.0,
     t_shift: float = 0.0,
-    reverse_path: Optional[bool] = None,
-    path_mode: str = "identity",
-    path_anchor: PathAnchor = DEFAULT_PATH_ANCHOR,
 ) -> np.ndarray:
-    """Sample sin(2πωt+φ) at warped index p; t=(p+½)/n with no boundary clamp."""
-    if reverse_path is None:
-        reverse_path = False
-    p_use = (
-        path_for_warp_numpy(p, path_mode=path_mode)
-        if reverse_path
-        else np.asarray(p, dtype=np.float64)
-    )
-    t_warp = (p_use + 0.5) / n
-    return np.sin(2.0 * np.pi * omega * time_scale * t_warp + phase + t_shift)
+    """``sin(2π ω t + φ)`` at mid-bin calendar ``t = (p+½)/n`` (no clamp).
+
+    The +½ centres each index in its unit bin. Prefit sines use
+    ``t0 + dt·p`` instead — see :func:`soft_warp_prefit_sine_numpy`.
+    """
+    p = np.asarray(p, dtype=np.float64)
+    t = (p + 0.5) / float(n)
+    return np.sin(2.0 * np.pi * omega * time_scale * t + phase + t_shift)
 
 
 def soft_warp_sine_torch(
@@ -129,67 +81,53 @@ def soft_warp_sine_torch(
     phase: float,
     time_scale: float = 1.0,
     t_shift: float = 0.0,
-    reverse_path: Optional[bool] = None,
-    path_mode: str = "identity",
-    path_anchor: PathAnchor = DEFAULT_PATH_ANCHOR,
 ) -> Tensor:
-    """Torch sin driver at warped index p; t=(p+½)/n with no boundary clamp."""
-    if reverse_path is None:
-        reverse_path = False
-    p_use = path_for_warp_torch(p, path_mode=path_mode) if reverse_path else p
-    t_warp = (p_use + 0.5) / n
-    return torch.sin(
-        2.0 * math.pi * omega * time_scale * t_warp + phase + t_shift
+    """Torch version of :func:`soft_warp_sine_numpy`."""
+    t = (p + 0.5) / float(n)
+    return torch.sin(2.0 * math.pi * omega * time_scale * t + phase + t_shift)
+
+
+# ---------------------------------------------------------------------------
+# Prefit sine on its own calendar  (t = t0 + dt · p)
+# ---------------------------------------------------------------------------
+
+
+def soft_warp_prefit_sine_numpy(p: np.ndarray, sine_fit: Dict[str, Any]) -> np.ndarray:
+    """Evaluate the prefit sine at warped indices using ``sine_fit['t0']``/``dt``.
+
+    Expansion past the train window reads known future values of the same
+    analytic sine (no clamp).
+    """
+    dt = sine_fit.get("dt")
+    t0 = sine_fit.get("t0")
+    if dt is None or t0 is None:
+        raise ValueError("soft_warp_prefit_sine requires sine_fit['t0'] and sine_fit['dt']")
+    p = np.asarray(p, dtype=np.float64)
+    t = float(t0) + float(dt) * p
+    return np.sin(
+        2.0
+        * np.pi
+        * float(sine_fit["omega"])
+        * float(sine_fit.get("time_scale", 1.0))
+        * t
+        + float(sine_fit["phase"])
+        + float(sine_fit.get("t_shift", 0.0))
     )
 
 
-def soft_warp_torch(
-    x: Tensor,
-    p: Tensor,
-    reverse_path: Optional[bool] = None,
-    path_mode: str = "identity",
-    path_anchor: PathAnchor = DEFAULT_PATH_ANCHOR,
-) -> Tensor:
-    if reverse_path is None:
-        reverse_path = False
-    p_use = path_for_warp_torch(p, path_mode=path_mode) if reverse_path else p
-    n = x.shape[0]
-    p_use = p_use.clamp(0.0, float(n) - 1.001)
-    i0 = torch.floor(p_use).long().clamp(0, n - 2)
-    i1 = i0 + 1
-    w = p_use - i0.to(p_use.dtype)
-    return (1.0 - w) * x[i0] + w * x[i1]
-
-
-def fill_nan_with_last_value(x: np.ndarray) -> np.ndarray:
-    out = x.copy()
-    last = out[0]
-    for i in range(len(out)):
-        if np.isnan(out[i]):
-            out[i] = last
-        else:
-            last = out[i]
-    return out
-
-
-def discrete_warp_numpy(x: np.ndarray, p: np.ndarray, n: int, sr: int = 10) -> np.ndarray:
-    """Discrete warp: Gaussian-shift path, column aggregate (O(n·sr) memory)."""
-    x = np.asarray(x, dtype=np.float64).reshape(-1)
-    p = np.asarray(p, dtype=np.float64).reshape(-1)
-    if len(p) != n:
-        p = np.interp(np.arange(n), np.linspace(0, n - 1, len(p)), p)
-    nrow = n * sr
-    ncol = nrow + (int(np.max(p)) if p.size and np.max(p) > 0 else 0)
-    cols: List[List[float]] = [[] for _ in range(ncol)]
-    for i in range(n):
-        r = i * sr
-        if i == 0:
-            if r < ncol:
-                cols[r].append(float(x[i]))
-        else:
-            c = r + int(p[i])
-            if 0 <= c < ncol:
-                cols[c].append(float(x[i]))
-    med = np.array([np.median(v) if v else np.nan for v in cols], dtype=np.float64)
-    return fill_nan_with_last_value(med)[::sr][:n]
-
+def soft_warp_prefit_sine_torch(p: Tensor, sine_fit: Dict[str, Any]) -> Tensor:
+    """Torch version of :func:`soft_warp_prefit_sine_numpy`."""
+    dt = sine_fit.get("dt")
+    t0 = sine_fit.get("t0")
+    if dt is None or t0 is None:
+        raise ValueError("soft_warp_prefit_sine requires sine_fit['t0'] and sine_fit['dt']")
+    t = float(t0) + float(dt) * p
+    return torch.sin(
+        2.0
+        * math.pi
+        * float(sine_fit["omega"])
+        * float(sine_fit.get("time_scale", 1.0))
+        * t
+        + float(sine_fit["phase"])
+        + float(sine_fit.get("t_shift", 0.0))
+    )

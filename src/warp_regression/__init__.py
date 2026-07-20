@@ -1,34 +1,51 @@
-"""Unified warp regression package."""
+"""Likelihood-based time warping for regression and forecasting.
 
-from .constants import DEFAULT_PATH_ANCHOR, PathAnchor, NOTEBOOK_LL_TARGET
+Typical imports
+---------------
+::
+
+    from warp_regression import WarpModel, soft_warp_numpy, DEFAULT_PATH_ANCHOR
+    from warp_regression import as_forecast_state, forecast_from_state, build_forecast_bands
+    from warp_regression import prefit, analyze_cycle_lengths
+"""
+
+from .block import WarpPath, WarpRegression
+from .core.path import (
+    DEFAULT_PATH_ANCHOR,
+    PathAnchor,
+    applied_path_offset_numpy,
+    stored_path_offset_numpy,
+)
+from .core.warp import soft_warp_numpy, soft_warp_sine_numpy
 from .forecast import (
     ForecastState,
+    ResidualSmoothFit,
+    apply_residual_forecast,
     as_forecast_state,
     build_forecast_bands,
     ci_band_params,
     count_bands_from_log1p_forecast,
+    fit_residual_smooth,
     forecast_from_state,
-    forecast_lynx_holdout_paths,
+    forecast_residual,
     interval_coverage,
     log1p_error_band_counts,
+    observation_components,
     per_index_rw_sigma,
+    predict_components,
     predict_forecast_realisations_torch,
+    predict_realisations_torch,
     sample_warp_paths_future,
     sample_warp_paths_future_knots,
 )
-from .model import FitResult, ForecastResult, WarpModel, WarpModelConfig
+from .model import FitResult, ForecastResult, WarpModel
+from .observation import ObservationModel
 from .cycle_analysis import (
     CycleLengthAnalysis,
     analyze_cycle_lengths,
     nominal_cycle_length,
     plot_cycle_length_distribution,
     sample_next_cycle_lengths,
-)
-from .residual_smooth import (
-    ResidualSmoothFit,
-    apply_residual_forecast,
-    fit_residual_smooth,
-    forecast_residual,
 )
 from .prefit import (
     LogTrendAnalysis,
@@ -37,61 +54,23 @@ from .prefit import (
     prefit,
     prefit_synthetic_path,
 )
-from .readouts.parametric import EvalReport, WarpParametricModel, evaluate_model
-from .readouts.dual import (
-    fit_dual_sine_shared_warp,
-    fit_dual_sine_shared_warp_nonlinear,
-)
-from .readouts.log_trend_sine import (
-    WarpReadout,
-    fetch_bitcoin_daily,
-    fit_log_trend,
-    fit_sine_peak_presize,
-    fit_warp_model,
-    forecast_future,
-    build_forecast_extension,
-    log_price,
-    normalized_time,
-    day_index,
-    split_bitcoin_holdout,
-    sine_from_fit,
-)
-from .drivers.sine import (
+from .covariates.sine import (
     align_sine_to_macro_peaks,
     build_dual_sines_from_fit,
     fit_dual_sine_log,
-    build_sine_features,
-    presize_dual_sine,
-    presize_log_trend_sine,
-    SineSpec,
-    sine_wave,
+    sine_from_fit,
+    eval_sine_driver,
 )
-from .utilities.datasets import build_synthetic_dataset, prepare_lynx_log, prepare_sunspots
-from .utilities.splits import (
-    cumsum_path_to_stored_path,
-    split_holdout_by_year,
-    split_lynx_holdout,
-    split_synthetic_holdout,
-)
-from .utilities.metrics import _r2_rmse
-from .plotting import (
-    format_date_axis,
-    plot_before_after_warp,
-    plot_dual_objective_scatter,
-    plot_fit_with_residual,
-    plot_forecast_bands,
-    plot_realisation_spaghetti,
-    plot_warp_offset,
-)
-from .core.path import applied_path_offset_numpy, stored_path_offset_numpy, point_forecast_path
-from .readouts.parametric import predict_realisations_torch
-from .core.warp import soft_warp_numpy, soft_warp_sine_numpy
+from .utilities.splits import cumsum_path_to_stored_path, split_holdout
+from .utilities.metrics import EvalReport
 
 __all__ = [
     "DEFAULT_PATH_ANCHOR",
     "PathAnchor",
+    "WarpPath",
+    "WarpRegression",
     "WarpModel",
-    "WarpModelConfig",
+    "ObservationModel",
     "FitResult",
     "ForecastResult",
     "ResidualSmoothFit",
@@ -108,10 +87,7 @@ __all__ = [
     "prefit",
     "prefit_synthetic_path",
     "analyze_log_trend",
-    "WarpParametricModel",
-    "WarpReadout",
     "EvalReport",
-    "NOTEBOOK_LL_TARGET",
     "ForecastState",
     "as_forecast_state",
     "forecast_from_state",
@@ -120,40 +96,22 @@ __all__ = [
     "interval_coverage",
     "count_bands_from_log1p_forecast",
     "log1p_error_band_counts",
-    "forecast_lynx_holdout_paths",
     "predict_forecast_realisations_torch",
     "predict_realisations_torch",
+    "predict_components",
+    "observation_components",
+    "per_index_rw_sigma",
+    "sample_warp_paths_future",
+    "sample_warp_paths_future_knots",
     "applied_path_offset_numpy",
     "stored_path_offset_numpy",
     "cumsum_path_to_stored_path",
-    "evaluate_model",
     "fit_dual_sine_log",
-    "fit_dual_sine_shared_warp",
-    "fit_dual_sine_shared_warp_nonlinear",
-    "fit_warp_model",
-    "forecast_future",
-    "build_forecast_extension",
-    "build_synthetic_dataset",
-    "prepare_lynx_log",
-    "prepare_sunspots",
-    "split_synthetic_holdout",
-    "split_holdout_by_year",
-    "split_lynx_holdout",
-    "split_bitcoin_holdout",
-    "fetch_bitcoin_daily",
-    "fit_log_trend",
-    "fit_sine_peak_presize",
+    "split_holdout",
     "sine_from_fit",
-    "build_sine_features",
-    "SineSpec",
-    "sine_wave",
-    "presize_dual_sine",
-    "presize_log_trend_sine",
-    "plot_realisation_spaghetti",
-    "plot_forecast_bands",
-    "plot_warp_offset",
-    "plot_fit_with_residual",
-    "plot_before_after_warp",
-    "plot_dual_objective_scatter",
-    "format_date_axis",
+    "eval_sine_driver",
+    "align_sine_to_macro_peaks",
+    "build_dual_sines_from_fit",
+    "soft_warp_numpy",
+    "soft_warp_sine_numpy",
 ]
