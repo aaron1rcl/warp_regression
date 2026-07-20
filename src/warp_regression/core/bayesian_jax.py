@@ -108,11 +108,6 @@ def gaussian_error_nll(resid, sigma):
 def dual_log_density(B, A, C, sigma_y, sigma_t, x, y, n_knots: int, lam: float = 0.5):
     """Dual log-density matching training at ``fit_lambda=lam``, untempered for priors.
 
-    Training minimises ``J = λ·error − (1−λ)·terror``. The same mode (without
-    priors) comes from maximising ``−error + ((1−λ)/λ)·terror``. Keeping the
-    observation term at full strength matters in PyMC: writing
-    ``−λ·error + (1−λ)·terror`` would temper the likelihood relative to the
-    priors and bias posteriors. At ``λ=0.5`` this is the natural joint
     ``−error + terror``.
     """
     if not (0.0 < lam <= 1.0):
