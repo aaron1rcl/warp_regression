@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 
-from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 import numpy as np
 import pandas as pd
 
@@ -37,6 +36,17 @@ def eval_sine_driver(
 ) -> np.ndarray:
     t = np.asarray(t, dtype=np.float64)
     return np.sin(2.0 * np.pi * omega * time_scale * t + phase + t_shift)
+
+
+def sine_from_fit(t: np.ndarray, sine_fit: Dict[str, Any]) -> np.ndarray:
+    """Evaluate a sine covariate from a prefit / sine_fit parameter dict."""
+    return eval_sine_driver(
+        t,
+        float(sine_fit["omega"]),
+        float(sine_fit["phase"]),
+        time_scale=float(sine_fit.get("time_scale", 1.0)),
+        t_shift=float(sine_fit.get("t_shift", 0.0)),
+    )
 
 
 def phase_for_peak_at(
@@ -234,11 +244,6 @@ def align_sine_to_macro_peaks(
     return best
 
 
-# Backward-compatible alias
-align_sine_last_macro_peak = align_sine_to_macro_peaks
-align_sine_to_peaks = align_sine_to_macro_peaks
-
-
 def _sine(t: np.ndarray, omega: float, phase: float) -> np.ndarray:
     return np.sin(2.0 * np.pi * omega * t + phase)
 
@@ -332,70 +337,4 @@ def build_dual_sines_from_fit(t: np.ndarray, sine_fit: Dict[str, Any]) -> Tuple[
     s1, s2 = sine_fit["sine1"], sine_fit["sine2"]
     return _sine(t, s1["omega"], s1["phase"]), _sine(t, s2["omega"], s2["phase"])
 
-
-def sine_wave(
-    t: np.ndarray,
-    omega: float,
-    phase: float,
-    time_scale: float = 1.0,
-    t_shift: float = 0.0,
-) -> np.ndarray:
-    return eval_sine_driver(t, omega, phase, time_scale, t_shift)
-
-
-@dataclass
-class SineSpec:
-    omega: float
-    phase: float
-    time_scale: float = 1.0
-    t_shift: float = 0.0
-
-
-def build_sine_features(t: np.ndarray, specs: List[SineSpec]) -> np.ndarray:
-    """Stack sine driver columns from arbitrary specs."""
-    cols = [
-        sine_wave(t, s.omega, s.phase, s.time_scale, s.t_shift)
-        for s in specs
-    ]
-    return np.column_stack(cols) if cols else np.empty((len(t), 0))
-
-
-def presize_dual_sine(
-    y: np.ndarray,
-    t: np.ndarray,
-    peak_idx: Optional[np.ndarray] = None,
-    years: Optional[np.ndarray] = None,
-    **kwargs: Any,
-) -> Dict[str, Any]:
-    """Lynx presize recipe: dual correlated sines on log counts."""
-    return fit_dual_sine_log(y, t, years=years, **kwargs)
-
-
-def presize_log_trend_sine(
-    y: np.ndarray,
-    t_idx: np.ndarray,
-    t: np.ndarray,
-    dates: pd.DatetimeIndex,
-    **kwargs: Any,
-) -> Dict[str, Any]:
-    """Deprecated: use analyze_log_trend + prefit(n_sines=1)."""
-    from ..prefit import analyze_log_trend, prefit
-    from ..utilities.bitcoin import detect_btc_cycle_peaks
-
-    prep = analyze_log_trend(y, t_idx)
-    peak_idx = detect_btc_cycle_peaks(y, dates)
-    pf = prefit(
-        prep.residual,
-        t,
-        n_sines=1,
-        peak_idx=peak_idx,
-        omega=float(kwargs.get("omega", 5.0)),
-        envelope_init=True,
-        **kwargs,
-    )
-    return {
-        "trend": {"B": prep.B, "C": prep.C, "z": prep.z, "trend": prep.trend, "pin": prep.pin},
-        "sine_fit": pf.sine_fit,
-        "z": pf.sine_fit["z"],
-    }
 

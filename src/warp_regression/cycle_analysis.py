@@ -8,9 +8,9 @@ from typing import Any, Dict, Literal, Optional, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 
-from .constants import DEFAULT_PATH_ANCHOR, PathAnchor
+from .core.path import DEFAULT_PATH_ANCHOR, PathAnchor
 from .core.warp import soft_warp_numpy, soft_warp_sine_numpy
-from .drivers.sine import eval_sine_driver
+from .covariates.sine import eval_sine_driver
 from .forecast import sample_warp_paths_future, sample_warp_paths_future_knots
 
 
@@ -183,7 +183,7 @@ def _warped_sine_on_path(
             time_scale=float(sine_params.get("time_scale", 1.0)),
             t_shift=float(sine_params.get("t_shift", 0.0)),
         )
-        return soft_warp_numpy(z, p, path_anchor=path_anchor)
+        return soft_warp_numpy(z, p)
     return soft_warp_sine_numpy(
         p,
         n_calendar,
@@ -191,7 +191,6 @@ def _warped_sine_on_path(
         sine_params["phase"],
         time_scale=sine_params["time_scale"],
         t_shift=sine_params["t_shift"],
-        path_anchor=path_anchor,
     )
 
 
@@ -244,10 +243,17 @@ def _resolve_warp_params(
         import torch
 
         with torch.no_grad():
-            p_train = model.path().detach().cpu().numpy()
-            sigma_t = float(torch.exp(model.log_sigma_t))
+            path = getattr(model, "primary_path", None)
+            if path is not None:
+                p_train = path.path().detach().cpu().numpy()
+                sigma_t = float(path.sigma_t.detach())
+                n_knots_default = int(path.n_knots)
+            else:
+                p_train = model.path().detach().cpu().numpy()
+                sigma_t = float(torch.exp(model.log_sigma_t))
+                n_knots_default = int(model.n_knots)
         n_obs_use = int(n_obs) if n_obs is not None else int(model.n)
-        n_knots_use = int(n_knots) if n_knots is not None else int(model.n_knots)
+        n_knots_use = int(n_knots) if n_knots is not None else n_knots_default
         return p_train, sigma_t, n_obs_use, n_knots_use
     raise ValueError("pass fit=... or model=...")
 
@@ -341,7 +347,7 @@ def analyze_cycle_lengths(
 ) -> CycleLengthAnalysis:
     """Infer next-cycle length distribution from fitted σ_t and a sine driver.
 
-    Pass a warp **fit** dict (Bitcoin/Lynx) or a fitted **WarpParametricModel**
+    Pass a warp **fit** dict (Bitcoin/Lynx) or a fitted **WarpModel**
     (synthetic), plus ``sine_fit`` (or sine fields on ``fit``). Cycle lengths
     are measured on the prefit sine evaluated at knot-smooth warp continuations
     by default — no dense per-index RW (which downward-biases crest spacing).

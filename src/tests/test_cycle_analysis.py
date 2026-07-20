@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import numpy as np
 
+from utils import (
+    fit_dual_sine_shared_warp_nonlinear,
+    prepare_lynx_log,
+    split_lynx_holdout,
+)
 from warp_regression import (
     analyze_cycle_lengths,
     fit_dual_sine_log,
-    fit_dual_sine_shared_warp_nonlinear,
     nominal_cycle_length,
-    prepare_lynx_log,
-    split_lynx_holdout,
 )
 
 

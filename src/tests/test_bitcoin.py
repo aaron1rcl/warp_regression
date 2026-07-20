@@ -4,17 +4,17 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from warp_regression import (
-    WarpModel,
+from utils import (
     day_index,
     fetch_bitcoin_daily,
     fit_log_trend,
     fit_sine_peak_presize,
     log_price,
     normalized_time,
+    sine_from_fit,
     split_bitcoin_holdout,
 )
-from warp_regression.utilities.bitcoin import sine_from_fit
+from warp_regression import WarpModel
 
 
 def _build_z_full(t: np.ndarray, sine_fit: dict) -> np.ndarray:

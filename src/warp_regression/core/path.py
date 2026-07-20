@@ -1,18 +1,47 @@
-"""Warp regression module."""
+"""Warp path geometry: knot coefficients → stored path → offsets.
+
+Glossary
+--------
+``B``
+    Free knot coefficients (length ``n_knots``), the trainable path parameters.
+``G``
+    Zero-gradient transform of ``B`` (``zero_gradient_G_*``). Forces the knot
+    increments to sum near zero so the path cannot drift purely linearly.
+``p`` (stored path)
+    Fractional covariate indices, length ``n``. Under ``path_mode='identity'``,
+    ``p[i] = i + o[i]`` where ``o`` is the warp offset.
+``path_anchor``
+    Where the offset is pinned during training. Default ``'start'`` pins
+    ``o[0] = 0`` and leaves the train end free so forecast RW can continue.
+    ``'end'`` pins ``o[-1] = 0`` instead.
+Soft-warp
+    Applies the **stored** ``p`` as-is. There is no reverse-path remapping in
+    the current training / forecast path.
+
+Legacy helpers ``path_for_warp_*`` / ``applied_path_offset_numpy`` reverse the
+offset sequence (old end-anchored convention). Soft-warp does not use them;
+they remain for notebook diagnostics only.
+"""
+
 from __future__ import annotations
 
+from typing import Literal, Tuple
 
-import math
-from typing import Optional, Tuple
 import numpy as np
 import torch
 from torch import Tensor
 
-from ..constants import DEFAULT_PATH_ANCHOR, PathAnchor
+PathAnchor = Literal["start", "end"]
+DEFAULT_PATH_ANCHOR: PathAnchor = "start"
+
+
+# ---------------------------------------------------------------------------
+# Legacy reverse mapping (diagnostics only — soft-warp does not use these)
+# ---------------------------------------------------------------------------
 
 
 def path_for_warp_numpy(p: np.ndarray, path_mode: str = "identity") -> np.ndarray:
-    """Apply stored path in reverse: p[0] (offset=0) anchors the last time index."""
+    """Reverse offset order: stored start-pin → applied end-pin coordinates."""
     p = np.asarray(p, dtype=np.float64)
     n = len(p)
     idx = np.arange(n, dtype=np.float64)
@@ -24,7 +53,7 @@ def path_for_warp_numpy(p: np.ndarray, path_mode: str = "identity") -> np.ndarra
 
 
 def path_for_warp_torch(p: Tensor, path_mode: str = "identity") -> Tensor:
-    """Apply stored path in reverse: p[0] (offset=0) anchors the last time index."""
+    """Torch version of :func:`path_for_warp_numpy`."""
     n = p.shape[0]
     idx = torch.arange(n, device=p.device, dtype=p.dtype)
     if path_mode == "identity":
@@ -34,21 +63,30 @@ def path_for_warp_torch(p: Tensor, path_mode: str = "identity") -> Tensor:
     return p.flip(0)
 
 
+def applied_path_offset_numpy(p: np.ndarray, path_mode: str = "identity") -> np.ndarray:
+    """Offsets after legacy reverse mapping (notebook diagnostics)."""
+    p_apply = path_for_warp_numpy(p, path_mode=path_mode)
+    return p_apply - np.arange(len(p_apply), dtype=np.float64)
+
+
+# ---------------------------------------------------------------------------
+# Knot grid and B → G → path
+# ---------------------------------------------------------------------------
+
+
 def knot_positions(n: int, n_knots: int) -> Tuple[np.ndarray, float]:
+    """Uniform knot locations on ``[0, n-1]`` and the RW segment width."""
     knot_x = np.linspace(0.0, n - 1.0, n_knots)
     rw_interval = float((n - 1) / max(n_knots - 1, 1))
     return knot_x, rw_interval
 
 
-def zero_gradient_G_numpy(B: np.ndarray) -> np.ndarray:
-    G = np.zeros_like(B, dtype=np.float64)
-    G[0] = B[0]
-    for i in range(1, len(B)):
-        G[i] = -np.sum(G[:i]) + B[i]
-    return G
-
-
 def zero_gradient_G_torch(B: Tensor) -> Tensor:
+    """Map free knot coeffs ``B`` → offsets ``G`` with near-zero cumulative drift.
+
+    Recursively ``G[i] = B[i] - sum(G[:i])``, so increments roughly cancel and
+    the path cannot absorb a pure linear trend into the knots alone.
+    """
     parts = [B[0]]
     cum = B[0]
     for i in range(1, B.shape[0]):
@@ -58,15 +96,8 @@ def zero_gradient_G_torch(B: Tensor) -> Tensor:
     return torch.stack(parts)
 
 
-def _offset_from_G_numpy(G: np.ndarray, n: int, n_knots: int) -> np.ndarray:
-    knot_x, _ = knot_positions(n, n_knots)
-    knot_x = np.append(knot_x, n - 1.0)
-    G = np.append(G, G[-1])
-    idx = np.arange(n, dtype=np.float64)
-    return np.interp(idx, knot_x, G)
-
-
 def _offset_from_G_torch(G: Tensor, n: int, n_knots: int) -> Tensor:
+    """Piecewise-linear interpolate knot offsets ``G`` onto every time index."""
     knot_x = torch.linspace(0, n - 1, n_knots, device=G.device, dtype=G.dtype)
     idx = torch.arange(n, device=G.device, dtype=G.dtype)
     offset = torch.zeros(n, device=G.device, dtype=G.dtype)
@@ -80,36 +111,6 @@ def _offset_from_G_torch(G: Tensor, n: int, n_knots: int) -> Tensor:
     return offset
 
 
-def path_from_B_numpy(
-    B: np.ndarray,
-    n: int,
-    n_knots: int,
-    path_mode: str = "identity",
-    path_anchor: PathAnchor = DEFAULT_PATH_ANCHOR,
-) -> np.ndarray:
-    """Stored path p with offset pinned at train end (``path_anchor='end'``) or start."""
-    G = zero_gradient_G_numpy(B)
-    G[0] = 0.0
-    if path_mode == "identity":
-        offset = _offset_from_G_numpy(G, n, n_knots)
-        if path_anchor == "end":
-            offset = offset[::-1].copy()
-            offset[-1] = 0.0
-        else:
-            offset[0] = 0.0
-        p = np.arange(n, dtype=np.float64) + offset
-    elif path_mode == "absolute":
-        p = _offset_from_G_numpy(G, n, n_knots)
-    else:
-        raise ValueError(path_mode)
-    if path_mode == "identity":
-        if path_anchor == "end":
-            p[-1] = float(n - 1)
-        else:
-            p[0] = 0.0
-    return p
-
-
 def path_from_B_torch(
     B: Tensor,
     n: int,
@@ -117,6 +118,11 @@ def path_from_B_torch(
     path_mode: str = "identity",
     path_anchor: PathAnchor = DEFAULT_PATH_ANCHOR,
 ) -> Tensor:
+    """Build stored path ``p`` from knot coefficients ``B``.
+
+    Forces ``G[0] = 0``, then pins either ``p[0]`` (``path_anchor='start'``) or
+    ``p[-1]`` (``'end'``) so that anchor index has zero offset.
+    """
     G = zero_gradient_G_torch(B)
     G = G.clone()
     G[0] = 0.0
@@ -142,65 +148,13 @@ def path_from_B_torch(
     return p
 
 
-def _B_from_G_numpy(G: np.ndarray) -> np.ndarray:
-    """Invert ``zero_gradient_G_numpy`` (with ``G[0]`` treated as free)."""
-    G = np.asarray(G, dtype=np.float64)
-    B = np.zeros_like(G)
-    cum = 0.0
-    for i in range(len(G)):
-        B[i] = G[i] + cum
-        cum += G[i]
-    return B
-
-
-def path_to_B_numpy(
-    p: np.ndarray,
-    n_knots: int,
-    path_mode: str = "identity",
-    path_anchor: PathAnchor = DEFAULT_PATH_ANCHOR,
-) -> np.ndarray:
-    """Project a stored path onto knot coefficients under the given anchor."""
-    p = np.asarray(p, dtype=np.float64)
-    n = len(p)
-    if path_mode == "identity":
-        offset = p - np.arange(n, dtype=np.float64)
-        if path_anchor == "end":
-            offset_g = offset[::-1].copy()
-            offset_g[0] = 0.0
-        else:
-            offset_g = offset.copy()
-            offset_g[0] = 0.0
-    elif path_mode == "absolute":
-        offset_g = p.copy()
-        offset_g[0] = 0.0
-    else:
-        raise ValueError(path_mode)
-    knot_x, _ = knot_positions(n, n_knots)
-    G = np.interp(knot_x, np.arange(n, dtype=np.float64), offset_g)
-    G[0] = 0.0
-    return _B_from_G_numpy(G)
-
-
-def to_start_anchored_path(
-    p: np.ndarray,
-    path_mode: str = "identity",
-    fit_anchor: PathAnchor = DEFAULT_PATH_ANCHOR,
-) -> np.ndarray:
-    """Warm-start path for prepare: stored == applied, free at the calendar end.
-
-    End-anchored fits already use stored=applied. Legacy reverse-convention
-    start paths are mapped to applied coordinates first. Prepare then rebuilds
-    with ``path_from_B(..., path_anchor='start')`` and soft-warps with
-    ``reverse_path=False`` so future RW stays at the series end.
-    """
-    p = np.asarray(p, dtype=np.float64)
-    if fit_anchor == "start":
-        # Reverse-convention start path → applied coordinates
-        return path_for_warp_numpy(p, path_mode=path_mode)
-    return p.copy()
+# ---------------------------------------------------------------------------
+# Offsets and deterministic forecast extension
+# ---------------------------------------------------------------------------
 
 
 def stored_path_offset_numpy(p: np.ndarray, path_mode: str = "identity") -> np.ndarray:
+    """``o[i] = p[i] - i`` under identity mode (else ``p`` itself)."""
     p = np.asarray(p, dtype=np.float64)
     if path_mode == "identity":
         return p - np.arange(len(p), dtype=np.float64)
@@ -213,10 +167,6 @@ def stored_path_offset_torch(p: Tensor, path_mode: str = "identity") -> Tensor:
         return p - idx
     return p
 
-
-def applied_path_offset_numpy(p: np.ndarray, path_mode: str = "identity") -> np.ndarray:
-    p_apply = path_for_warp_numpy(p, path_mode=path_mode)
-    return p_apply - np.arange(len(p_apply), dtype=np.float64)
 
 def point_forecast_path(
     p_train: np.ndarray,
@@ -238,21 +188,3 @@ def point_forecast_path(
         else:
             p_det[0] = 0.0
     return p_det
-def extended_knot_positions(n_train: int, n_total: int, n_knots: int) -> np.ndarray:
-    """Knot grid: train ``linspace(0, n_train-1, n_knots)``, extended with same spacing."""
-    train_knots = np.linspace(0.0, float(n_train - 1), n_knots)
-    if n_total <= n_train:
-        return train_knots
-    step = (n_train - 1) / max(n_knots - 1, 1)
-    xs = list(train_knots)
-    x = float(n_train - 1)
-    while x < n_total - 1 - 1e-9:
-        x += step
-        xs.append(min(x, float(n_total - 1)))
-        if xs[-1] >= n_total - 1 - 1e-9:
-            break
-    if xs[-1] < n_total - 1 - 1e-9:
-        xs.append(float(n_total - 1))
-    return np.unique(np.asarray(xs, dtype=np.float64))
-
-

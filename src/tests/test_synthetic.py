@@ -1,13 +1,12 @@
 from __future__ import annotations
 
+from utils import build_synthetic_dataset, split_synthetic_holdout
 import numpy as np
 import torch
 
 from warp_regression import (
     WarpModel,
-    build_synthetic_dataset,
-    split_synthetic_holdout,
-)
+    )
 
 
 def test_synthetic_holdout(baselines):

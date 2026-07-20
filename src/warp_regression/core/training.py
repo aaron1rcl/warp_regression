@@ -1,6 +1,12 @@
-"""Warp regression module."""
-from __future__ import annotations
+"""Dual-loss training: Gaussian observation NLL + terror (path) likelihood.
 
+Terror helpers implement the WarpPureNumpy Brownian-bridge expectation between
+knot offsets (see README “Terror”). ``terror_ll`` sums per-segment
+``expected_likelihood`` terms; the dual objective mixes ``−log p(y|ŷ,σ_y)``
+with ``terror_ll`` via ``fit_lambda``.
+"""
+
+from __future__ import annotations
 
 import math
 from dataclasses import dataclass
@@ -12,6 +18,7 @@ import torch.nn as nn
 from torch import Tensor
 
 from .path import path_from_B_torch, stored_path_offset_torch
+
 
 def reverse_softplus_torch(x: Tensor) -> Tensor:
     out = x.clone()
@@ -64,14 +71,18 @@ def px_z_torch(u1: Tensor, u2: Tensor, sd1: Tensor, sd2: Tensor) -> Tensor:
 
 
 def expected_likelihood_torch(d: Tensor, sd: Tensor, n_steps: float) -> Tensor:
-    """WarpPureNumpy expected_likelihood."""
+    """Expected log-likelihood of a Brownian-bridge segment of length ``n_steps``.
+
+    Integrates out the unknown within-segment path between knot endpoints
+    separated by displacement ``d``, under timing scale ``sd`` (= σ_t).
+    """
     post_u, post_sd = conditional_posterior_torch(d, sd, n_steps)
     el = torch.log(px_z_torch(torch.zeros((), device=d.device, dtype=d.dtype), post_u, sd, post_sd))
     return reverse_softplus_torch(el * n_steps)
 
 
 def terror_likelihood_torch(p: Tensor, sigma_t: Tensor, n_knots: int) -> Tensor:
-    """WarpPureNumpy terror_likelihood on path values p (offsets for identity mode)."""
+    """Sum of expected segment likelihoods along the warp offsets ``p``."""
     n = int(p.shape[0])
     k_values, rw_width = terror_knot_values(n, n_knots)
     k_values = np.append(k_values, n - 1.0)

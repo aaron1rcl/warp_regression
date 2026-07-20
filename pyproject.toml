@@ -18,13 +18,21 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "nbconvert>=7.0", "ipykernel>=6.0"]
+bayes = [
+    "pymc>=5.10",
+    "jax>=0.4",
+    "jaxlib>=0.4",
+    "numpyro>=0.13",
+    "arviz>=0.16",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["warp_regression*"]
 
 [tool.pytest.ini_options]
 testpaths = ["src/tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "examples", "."]
 markers = [
     "slow: full-epoch reproduction (Bitcoin 24k epochs)",
 ]

@@ -21,5 +21,5 @@ class EvalReport:
     obj_time: float
     err_nll: float
     time_ll: float
-    ll_distance: float
+    ll_distance: Optional[float] = None
     discrete_mse: Optional[float] = None

@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
-from .constants import DEFAULT_PATH_ANCHOR, PathAnchor
+from .core.path import DEFAULT_PATH_ANCHOR, PathAnchor
 from .core.path import path_from_B_torch
 from .core.training import terror_likelihood_torch, terror_path_for_likelihood_torch
 from .core.warp import (
@@ -20,7 +20,12 @@ from .core.warp import (
     soft_warp_prefit_sine_torch,
     soft_warp_sine_torch,
 )
-SampleKind = Literal["array", "analytic_sine", "prefit_sine"]
+
+# How the covariate is obtained at path indices p:
+#   array          — soft_warp of a discrete driver array
+#   analytic_sine  — closed-form sin at t = (p+½)/n
+#   prefit_sine    — closed-form sin on the prefit calendar t0 + dt·p
+CovariateKind = Literal["array", "analytic_sine", "prefit_sine"]
 
 
 class WarpPath(nn.Module):
@@ -102,20 +107,21 @@ class WarpPath(nn.Module):
 class WarpRegression(nn.Module):
     """Single-series warp block: soft-warps one covariate under a WarpPath.
 
-    Portable to other PyTorch problems. Owns path-level forecast helpers via
-    the attached ``WarpPath`` (which may be shared across blocks).
+    ``covariate_kind`` selects how values are read at path indices (array
+    interpolation vs analytic / prefit sine). Portable to other PyTorch
+    problems; path-level forecast helpers live on the attached ``WarpPath``.
     """
 
     def __init__(
         self,
         path: WarpPath,
         *,
-        sample: SampleKind = "array",
+        covariate_kind: CovariateKind = "array",
         name: str = "x",
     ) -> None:
         super().__init__()
         self.path_module = path
-        self.sample: SampleKind = sample
+        self.covariate_kind: CovariateKind = covariate_kind
         self.name = name
 
     @property
@@ -135,15 +141,17 @@ class WarpRegression(nn.Module):
         *,
         sine_fit: Optional[Dict[str, Any]] = None,
         n_norm: Optional[int] = None,
+        covariate_kind: Optional[CovariateKind] = None,
     ) -> Tensor:
+        """Soft-warp covariate at path ``p`` (torch; used in training)."""
         if p is None:
             p = self.path_tensor(n=int(x.shape[0]))
-        pm = self.path_module
-        if self.sample == "array":
-            return soft_warp_torch(x, p, path_mode=pm.path_mode, path_anchor=pm.path_anchor)
-        if self.sample == "analytic_sine":
+        kind = covariate_kind if covariate_kind is not None else self.covariate_kind
+        if kind == "array":
+            return soft_warp_torch(x, p)
+        if kind == "analytic_sine":
             if sine_fit is None:
-                raise ValueError("analytic_sine sample requires sine_fit")
+                raise ValueError("analytic_sine requires sine_fit")
             n_ref = int(n_norm if n_norm is not None else x.shape[0])
             return soft_warp_sine_torch(
                 p,
@@ -152,13 +160,12 @@ class WarpRegression(nn.Module):
                 float(sine_fit["phase"]),
                 time_scale=float(sine_fit.get("time_scale", 1.0)),
                 t_shift=float(sine_fit.get("t_shift", 0.0)),
-                reverse_path=False,
             )
-        if self.sample == "prefit_sine":
+        if kind == "prefit_sine":
             if sine_fit is None:
-                raise ValueError("prefit_sine sample requires sine_fit")
-            return soft_warp_prefit_sine_torch(p, sine_fit, path_mode=pm.path_mode)
-        raise ValueError(f"unknown sample kind: {self.sample}")
+                raise ValueError("prefit_sine requires sine_fit")
+            return soft_warp_prefit_sine_torch(p, sine_fit)
+        raise ValueError(f"unknown covariate_kind: {kind}")
 
     def warp_numpy(
         self,
@@ -167,13 +174,15 @@ class WarpRegression(nn.Module):
         *,
         sine_fit: Optional[Dict[str, Any]] = None,
         n_norm: Optional[int] = None,
+        covariate_kind: Optional[CovariateKind] = None,
     ) -> np.ndarray:
-        pm = self.path_module
-        if self.sample == "array":
-            return soft_warp_numpy(x, p, path_mode=pm.path_mode, path_anchor=pm.path_anchor)
-        if self.sample == "analytic_sine":
+        """Soft-warp covariate at path ``p`` (numpy; used in forecast / plots)."""
+        kind = covariate_kind if covariate_kind is not None else self.covariate_kind
+        if kind == "array":
+            return soft_warp_numpy(x, p)
+        if kind == "analytic_sine":
             if sine_fit is None:
-                raise ValueError("analytic_sine sample requires sine_fit")
+                raise ValueError("analytic_sine requires sine_fit")
             n_ref = int(n_norm if n_norm is not None else len(x))
             return soft_warp_sine_numpy(
                 p,
@@ -182,13 +191,12 @@ class WarpRegression(nn.Module):
                 float(sine_fit["phase"]),
                 time_scale=float(sine_fit.get("time_scale", 1.0)),
                 t_shift=float(sine_fit.get("t_shift", 0.0)),
-                path_anchor=pm.path_anchor,
             )
-        if self.sample == "prefit_sine":
+        if kind == "prefit_sine":
             if sine_fit is None:
-                raise ValueError("prefit_sine sample requires sine_fit")
-            return soft_warp_prefit_sine_numpy(p, sine_fit, path_mode=pm.path_mode)
-        raise ValueError(f"unknown sample kind: {self.sample}")
+                raise ValueError("prefit_sine requires sine_fit")
+            return soft_warp_prefit_sine_numpy(p, sine_fit)
+        raise ValueError(f"unknown covariate_kind: {kind}")
 
     def sample_paths(self, *args: Any, **kwargs: Any) -> np.ndarray:
         return self.path_module.sample_paths(*args, **kwargs)

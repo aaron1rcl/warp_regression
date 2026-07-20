@@ -1,1 +1,1 @@
-"""Cross-cutting dataset, split, metric, and plot helpers."""
+"""Cross-cutting split and metric helpers."""

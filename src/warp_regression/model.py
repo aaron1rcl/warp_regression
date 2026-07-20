@@ -12,139 +12,23 @@ import torch.nn as nn
 import yaml
 from torch import Tensor
 
-from .block import WarpPath, WarpRegression
-from .constants import DEFAULT_PATH_ANCHOR, PathAnchor
-from .core.training import DualLossValues, _lambda_schedule, compute_dual_loss, gaussian_error_nll
+from .block import CovariateKind, WarpPath, WarpRegression
+from .core.path import DEFAULT_PATH_ANCHOR, PathAnchor
+from .core.training import DualLossValues, _lambda_schedule, compute_dual_loss
 from .forecast import ForecastState, forecast_from_state
 from .observation import ObservationModel
 from .utilities.metrics import _r2_rmse
 
 
 def _repo_configs_dir() -> Path:
-    return Path(__file__).resolve().parents[2] / "configs"
+    # examples/models/*.yaml (repo root / examples / models)
+    return Path(__file__).resolve().parents[2] / "examples" / "models"
 
 
-@dataclass
-class WarpModelConfig:
-    """Legacy constructor mapping; prefer ``WarpModel.from_yaml``."""
-
-    observation: str = "affine"  # affine | linear_multi | mlp_on_warped | log_trend_sine
-    readout: Optional[str] = None  # deprecated alias
-    n_knots: int = 8
-    fit_lambda: float = 0.5
-    epochs: int = 1000
-    lr: float = 0.03
-    path_anchor: PathAnchor = DEFAULT_PATH_ANCHOR
-    path_mode: str = "identity"
-    seed: int = 0
-    mlp_hidden: int = 32
-    mlp_layers: int = 2
-    A_init: float = 1.0
-    C_init: float = 0.0
-    residual_smooth_horizon: Optional[int] = None
-
-    def to_dict(self) -> Dict[str, Any]:
-        kind = self.readout or self.observation
-        mapping = {
-            "parametric": "affine",
-            "dual_linear": "linear_multi",
-            "dual_mlp": "mlp_on_warped",
-            "log_trend_sine": "log_trend_sine",
-            "affine": "affine",
-            "linear_multi": "linear_multi",
-            "mlp_on_warped": "mlp_on_warped",
-        }
-        kind = mapping.get(kind, kind)
-        if kind == "affine":
-            return {
-                "n_knots": self.n_knots,
-                "path_anchor": self.path_anchor,
-                "path_mode": self.path_mode,
-                "path_groups": {"shared": {}},
-                "blocks": [{"id": "x", "path_group": "shared", "input": "x", "sample": "array"}],
-                "observation": {
-                    "terms": [{"kind": "affine", "inputs": ["x"], "A_init": self.A_init, "C_init": self.C_init}]
-                },
-                "train": {
-                    "epochs": self.epochs,
-                    "lr": self.lr,
-                    "fit_lambda": self.fit_lambda,
-                    "seed": self.seed,
-                },
-            }
-        if kind == "linear_multi":
-            return {
-                "n_knots": self.n_knots,
-                "path_anchor": self.path_anchor,
-                "path_mode": self.path_mode,
-                "path_groups": {"shared": {}},
-                "blocks": [
-                    {"id": "z1", "path_group": "shared", "input": "z1", "sample": "array"},
-                    {"id": "z2", "path_group": "shared", "input": "z2", "sample": "array"},
-                ],
-                "observation": {"terms": [{"kind": "linear_multi", "inputs": ["z1", "z2"]}]},
-                "train": {
-                    "epochs": self.epochs,
-                    "lr": self.lr,
-                    "fit_lambda": self.fit_lambda,
-                    "seed": self.seed,
-                },
-            }
-        if kind == "mlp_on_warped":
-            return {
-                "n_knots": self.n_knots,
-                "path_anchor": self.path_anchor,
-                "path_mode": self.path_mode,
-                "path_groups": {"shared": {}},
-                "blocks": [
-                    {"id": "z1", "path_group": "shared", "input": "z1", "sample": "array"},
-                    {"id": "z2", "path_group": "shared", "input": "z2", "sample": "array"},
-                ],
-                "observation": {
-                    "terms": [
-                        {
-                            "kind": "mlp_on_warped",
-                            "inputs": ["z1", "z2"],
-                            "hidden": self.mlp_hidden,
-                            "layers": self.mlp_layers,
-                            "act": "gelu",
-                        }
-                    ]
-                },
-                "train": {
-                    "epochs": self.epochs,
-                    "lr": self.lr,
-                    "fit_lambda": self.fit_lambda,
-                    "seed": self.seed,
-                },
-            }
-        if kind == "log_trend_sine":
-            return {
-                "n_knots": self.n_knots,
-                "path_anchor": self.path_anchor,
-                "path_mode": self.path_mode,
-                "path_groups": {"shared": {}},
-                "blocks": [{"id": "z", "path_group": "shared", "input": "z", "sample": "array"}],
-                "observation": {
-                    "terms": [
-                        {"kind": "log_trend"},
-                        {
-                            "kind": "envelope_sine",
-                            "inputs": ["z"],
-                            "hidden": self.mlp_hidden,
-                            "layers": self.mlp_layers,
-                            "act": "relu",
-                        },
-                    ]
-                },
-                "train": {
-                    "epochs": self.epochs,
-                    "lr": self.lr,
-                    "fit_lambda": self.fit_lambda,
-                    "seed": self.seed,
-                },
-            }
-        raise ValueError(f"unknown observation kind: {kind}")
+def _block_covariate_kind(bspec: Dict[str, Any]) -> CovariateKind:
+    """Read ``covariate_kind`` from a YAML block; accept legacy ``sample`` key."""
+    kind = bspec.get("covariate_kind", bspec.get("sample", "array"))
+    return kind  # type: ignore[return-value]
 
 
 @dataclass
@@ -172,19 +56,12 @@ class WarpModel(nn.Module):
 
     def __init__(
         self,
-        config: Optional[Union[Dict[str, Any], WarpModelConfig]] = None,
+        config: Optional[Dict[str, Any]] = None,
         *,
         n: Optional[int] = None,
     ) -> None:
         super().__init__()
-        if config is None:
-            config = {}
-        if isinstance(config, WarpModelConfig):
-            self._legacy_cfg = config
-            config = config.to_dict()
-        else:
-            self._legacy_cfg = None
-        self.config = dict(config)
+        self.config = dict(config or {})
         self.n = int(n) if n is not None else 0
         self.path_anchor: PathAnchor = self.config.get("path_anchor", DEFAULT_PATH_ANCHOR)
         self.path_mode: str = self.config.get("path_mode", "identity")
@@ -255,7 +132,7 @@ class WarpModel(nn.Module):
                 raise ValueError(f"block {bid} references unknown path_group {pg_name}")
             self.blocks[bid] = WarpRegression(
                 self.path_groups[pg_name],
-                sample=bspec.get("sample", "array"),
+                covariate_kind=_block_covariate_kind(bspec),
                 name=str(bspec.get("input", bid)),
             )
         obs_cfg = self.config.get("observation", {})
@@ -291,17 +168,21 @@ class WarpModel(nn.Module):
         *,
         sine_fit: Optional[Dict[str, Any]] = None,
         n_norm: Optional[int] = None,
+        force_kind: Optional[CovariateKind] = None,
     ) -> Dict[str, Tensor]:
         assert self.observation is not None
         warped: Dict[str, Tensor] = {}
         for bid, block in self.blocks.items():
             key = self._resolve_input_name(block, bid)
             x = covariates.get(key, covariates.get(bid))
-            if x is None and block.sample == "array":
+            kind = force_kind if force_kind is not None else block.covariate_kind
+            if x is None and kind == "array":
                 raise ValueError(f"missing covariate '{key}' for block '{bid}'")
             if x is None:
                 x = torch.zeros(int(p.shape[0]), dtype=torch.float32)
-            warped[key] = block.warp(x, p, sine_fit=sine_fit, n_norm=n_norm)
+            warped[key] = block.warp(
+                x, p, sine_fit=sine_fit, n_norm=n_norm, covariate_kind=kind
+            )
             warped[bid] = warped[key]
         return warped
 
@@ -315,45 +196,44 @@ class WarpModel(nn.Module):
         sine_fit: Optional[Dict[str, Any]] = None,
         n_norm: Optional[int] = None,
         y_for_ls: Optional[Tensor] = None,
+        force_kind: Optional[CovariateKind] = None,
     ) -> tuple[Tensor, Tensor]:
         assert self.observation is not None
         path = self.primary_path
         if p is None:
-            p = path.path(B=B, n=int(next(iter(covariates.values())).shape[0]))
-        warped = self._warp_all(covariates, p, sine_fit=sine_fit, n_norm=n_norm)
+            # Path length follows the model window (len(y)), not covariate length.
+            # Covariates may be longer so expansion can read future driver values.
+            n_path = int(self.n) if self.n else (
+                int(y_for_ls.shape[0]) if y_for_ls is not None
+                else int(next(iter(covariates.values())).shape[0])
+            )
+            p = path.path(B=B, n=n_path)
+        warped = self._warp_all(
+            covariates, p, sine_fit=sine_fit, n_norm=n_norm, force_kind=force_kind
+        )
         if y_for_ls is not None:
             self.observation.closed_form_step(warped, y_for_ls)
         y_hat = self.observation(warped, calendar)
         return y_hat, p
 
-    def fit(
+    def _prepare_fit_inputs(
         self,
         y: np.ndarray,
-        covariates: Optional[Dict[str, np.ndarray]] = None,
-        *,
-        drivers: Optional[Dict[str, np.ndarray]] = None,
-        calendar: Optional[Dict[str, np.ndarray]] = None,
-        t_idx: Optional[np.ndarray] = None,
-        t_norm: Optional[np.ndarray] = None,
-        sine_fit: Optional[Dict[str, Any]] = None,
-        B_init: Optional[Union[Tensor, np.ndarray, Dict[str, Any]]] = None,
-        epochs: Optional[int] = None,
-        lr: Optional[float] = None,
-        fit_lambda: Optional[float] = None,
-        seed: Optional[int] = None,
-        years: Optional[np.ndarray] = None,
-    ) -> FitResult:
-        del years  # prefit responsibility
+        covariates: Optional[Dict[str, np.ndarray]],
+        calendar: Optional[Dict[str, np.ndarray]],
+        t_idx: Optional[np.ndarray],
+        t_norm: Optional[np.ndarray],
+        sine_fit: Optional[Dict[str, Any]],
+        B_init: Optional[Union[Tensor, np.ndarray, Dict[str, Any]]],
+    ) -> tuple[np.ndarray, Dict[str, np.ndarray], Dict[str, np.ndarray], int]:
+        """Normalize arrays, build the model, and init observation from sine/log-trend."""
         y = np.asarray(y, dtype=np.float64)
-        if covariates is None:
-            covariates = drivers
         covariates = {k: np.asarray(v, dtype=np.float64) for k, v in (covariates or {}).items()}
         calendar = {k: np.asarray(v, dtype=np.float64) for k, v in (calendar or {}).items()}
         if t_idx is not None:
             calendar["t_idx"] = np.asarray(t_idx, dtype=np.float64)
         if t_norm is not None:
             calendar["t_norm"] = np.asarray(t_norm, dtype=np.float64)
-        # Bitcoin: z from sine_fit when not passed
         if sine_fit is not None and "z" not in covariates and "z" in sine_fit:
             covariates["z"] = np.asarray(sine_fit["z"], dtype=np.float64)[: len(y)]
         n = len(y)
@@ -373,43 +253,62 @@ class WarpModel(nn.Module):
                     self.primary_path.B.copy_(torch.as_tensor(b0, dtype=torch.float32).reshape(-1))
 
         assert self.observation is not None
-        # Bitcoin-style init from sine_fit / log trend if present
         if sine_fit is not None and any(t["kind"] == "log_trend" for t in self.observation.term_specs):
-            from .utilities.bitcoin import fit_log_trend
+            from .prefit import analyze_log_trend
 
-            t_idx = calendar.get("t_idx")
-            if t_idx is not None:
-                B, C, z, _, _ = fit_log_trend(y, t_idx)
-                self.observation.init_log_trend_from_fit(B, C, z)
+            t_idx_arr = calendar.get("t_idx")
+            if t_idx_arr is not None:
+                prep = analyze_log_trend(y, t_idx_arr)
+                self.observation.init_log_trend_from_fit(
+                    prep.B, prep.C, prep.z, gamma=float(prep.gamma)
+                )
             self.observation.init_envelope_from_sine(
                 float(sine_fit.get("f_init", 0.1)),
-                float(sine_fit.get("d_init", 0.0)),
+                a_floor_init=float(
+                    sine_fit.get("a_floor_init", sine_fit.get("a_inf_init", 1.0))
+                ),
+                kappa_init=float(
+                    sine_fit.get("kappa_init", sine_fit.get("lam_init", 0.0))
+                ),
             )
 
         self._y = y
         self._covariates = covariates
         self._calendar = calendar
         self._sine_fit = sine_fit
+        return y, covariates, calendar, n
 
-        epochs = int(epochs if epochs is not None else self.epochs)
-        lr = float(lr if lr is not None else self.lr)
-        fit_lambda = self.fit_lambda if fit_lambda is None else fit_lambda
-        seed = int(seed if seed is not None else self.seed)
-        torch.manual_seed(seed)
-
-        cov_t = {k: torch.tensor(v, dtype=torch.float32) for k, v in covariates.items()}
-        cal_t = {k: torch.tensor(v, dtype=torch.float32) for k, v in calendar.items()}
-        y_t = torch.tensor(y, dtype=torch.float32)
+    def _calendar_n_norm(self, calendar: Dict[str, np.ndarray], sine_fit: Optional[Dict[str, Any]], n: int) -> int:
+        """Reference length for analytic sine mid-bin calendar ``t = (p+½)/n``."""
         n_norm = int(sine_fit.get("n_calendar", n)) if sine_fit else n
-        # Prefer package convention: bitcoin stores n from normalized time
         if calendar.get("t_norm") is not None and len(calendar["t_norm"]):
             t0 = float(calendar["t_norm"][0])
             if t0 > 0:
                 n_norm = int(round(0.5 / t0))
+        return n_norm
+
+    def _run_dual_training(
+        self,
+        y: np.ndarray,
+        covariates: Dict[str, np.ndarray],
+        calendar: Dict[str, np.ndarray],
+        sine_fit: Optional[Dict[str, Any]],
+        n: int,
+        epochs: int,
+        lr: float,
+        fit_lambda: Any,
+        seed: int,
+    ) -> tuple[Dict[str, Any], List[DualLossValues], int]:
+        """Adam loop on dual loss; returns best checkpoint, history, and n_norm."""
+        torch.manual_seed(seed)
+        cov_t = {k: torch.tensor(v, dtype=torch.float32) for k, v in covariates.items()}
+        cal_t = {k: torch.tensor(v, dtype=torch.float32) for k, v in calendar.items()}
+        y_t = torch.tensor(y, dtype=torch.float32)
+        n_norm = self._calendar_n_norm(calendar, sine_fit, n)
 
         path = self.primary_path
+        assert self.observation is not None
         params: List[Tensor] = [path.B, self.log_sigma, path.log_sigma_t]
-        # Unique path groups
         seen = {id(path)}
         for pg in self.path_groups.values():
             if id(pg) not in seen:
@@ -422,7 +321,7 @@ class WarpModel(nn.Module):
         best: Dict[str, Any] = {}
         best_loss = float("inf")
         kinds = {t["kind"] for t in self.observation.term_specs}
-        use_ls = bool(kinds & {"affine", "linear_multi"})
+        use_ls = bool(kinds & {"linear", "affine", "linear_multi"})
 
         for ep in range(epochs):
             opt.zero_grad()
@@ -445,7 +344,6 @@ class WarpModel(nn.Module):
                 lam,
                 path_mode=self.path_mode,
             )
-            # Additional independent path groups contribute terror only
             for pg in self.path_groups.values():
                 if pg is path:
                     continue
@@ -485,18 +383,38 @@ class WarpModel(nn.Module):
                 n_norm=n_norm,
                 y_for_ls=y_t if use_ls else None,
             )
-            y_hat_np = y_hat_f.detach().cpu().numpy()
-            p_np = p_f.detach().cpu().numpy()
+            best["y_hat_final"] = y_hat_f.detach().cpu().numpy()
+            best["p_final"] = p_f.detach().cpu().numpy()
+            best["kinds"] = kinds
+            best["use_ls"] = use_ls
 
-        r2, rmse = _r2_rmse(y, y_hat_np)
-        self._y_hat = y_hat_np
+        return best, history, n_norm
+
+    def _pack_fit_meta(
+        self,
+        y: np.ndarray,
+        y_hat: np.ndarray,
+        p_np: np.ndarray,
+        best: Dict[str, Any],
+        history: List[DualLossValues],
+        n_norm: int,
+        sine_fit: Optional[Dict[str, Any]],
+    ) -> FitResult:
+        assert self.observation is not None
+        path = self.primary_path
+        n = len(y)
+        r2, rmse = _r2_rmse(y, y_hat)
+        self._y_hat = y_hat
+        kinds = best["kinds"]
         obs_kind = next(iter(kinds)) if len(kinds) == 1 else "composed"
         if "mlp_on_warped" in kinds:
             kind = "dual_mlp"
-        elif "linear_multi" in kinds:
-            kind = "dual_linear"
-        elif "affine" in kinds:
-            kind = "parametric"
+        elif kinds & {"linear", "linear_multi", "affine"}:
+            multi = any(
+                t["kind"] in ("linear", "linear_multi", "affine") and len(t.get("inputs", ["x"])) > 1
+                for t in self.observation.term_specs
+            )
+            kind = "dual_linear" if multi else "affine"
         elif "log_trend" in kinds or "envelope_sine" in kinds:
             kind = "log_trend_sine"
         else:
@@ -509,7 +427,6 @@ class WarpModel(nn.Module):
             "warp": {
                 "p": p_np,
                 "B": best["B"].numpy(),
-                "B_spline": best["B"].numpy(),
                 "n_knots": path.n_knots,
                 "path_anchor": self.path_anchor,
                 "obj_err": best["obj_err"],
@@ -522,23 +439,46 @@ class WarpModel(nn.Module):
             "sine_fit": sine_fit,
             "n_knots": path.n_knots,
             "_y_train": y,
-            "_y_log_train": y,
         }
-        # Legacy alias used by forecast adapters
-        self._fit_meta["readout"] = self._legacy_readout_handle()
-        return FitResult(y_hat=y_hat_np, r2=r2, rmse=rmse, fit=self._fit_meta)
+        return FitResult(y_hat=y_hat, r2=r2, rmse=rmse, fit=self._fit_meta)
 
-    def _legacy_readout_handle(self) -> Any:
-        """Object shaped like old dual/bitcoin readouts for forecast adapters."""
-        assert self.observation is not None
-        kinds = {t["kind"] for t in self.observation.term_specs}
-        if "linear_multi" in kinds:
-            return _LinearObsAdapter(self.observation)
-        if "mlp_on_warped" in kinds:
-            return _MlpObsAdapter(self.observation)
-        if "log_trend" in kinds or "envelope_sine" in kinds:
-            return _BitcoinObsAdapter(self.observation)
-        return _AffineObsAdapter(self.observation)
+    def fit(
+        self,
+        y: np.ndarray,
+        covariates: Optional[Dict[str, np.ndarray]] = None,
+        *,
+        calendar: Optional[Dict[str, np.ndarray]] = None,
+        t_idx: Optional[np.ndarray] = None,
+        t_norm: Optional[np.ndarray] = None,
+        sine_fit: Optional[Dict[str, Any]] = None,
+        B_init: Optional[Union[Tensor, np.ndarray, Dict[str, Any]]] = None,
+        epochs: Optional[int] = None,
+        lr: Optional[float] = None,
+        fit_lambda: Optional[float] = None,
+        seed: Optional[int] = None,
+        years: Optional[np.ndarray] = None,
+    ) -> FitResult:
+        del years  # prefit responsibility
+        y, covariates, calendar, n = self._prepare_fit_inputs(
+            y, covariates, calendar, t_idx, t_norm, sine_fit, B_init
+        )
+        epochs = int(epochs if epochs is not None else self.epochs)
+        lr = float(lr if lr is not None else self.lr)
+        fit_lambda = self.fit_lambda if fit_lambda is None else fit_lambda
+        seed = int(seed if seed is not None else self.seed)
+
+        best, history, n_norm = self._run_dual_training(
+            y, covariates, calendar, sine_fit, n, epochs, lr, fit_lambda, seed
+        )
+        return self._pack_fit_meta(
+            y,
+            best["y_hat_final"],
+            best["p_final"],
+            best,
+            history,
+            n_norm,
+            sine_fit,
+        )
 
     @property
     def _fit(self) -> Optional[Dict[str, Any]]:
@@ -551,6 +491,25 @@ class WarpModel(nn.Module):
     def path_B(self) -> Tensor:
         return self.primary_path.B.detach().clone()
 
+    def _forecast_force_kind(
+        self, sine_fit: Optional[Dict[str, Any]]
+    ) -> Optional[CovariateKind]:
+        """Override covariate kind for horizon expansion (analytic/prefit sine)."""
+        if sine_fit is None:
+            return None
+        kind_meta = self._fit_meta.get("kind")
+        if kind_meta == "log_trend_sine":
+            return "analytic_sine"
+        if (
+            kind_meta == "affine"
+            and sine_fit.get("dt") is not None
+            and sine_fit.get("t0") is not None
+        ):
+            return "prefit_sine"
+        if any(b.covariate_kind in ("analytic_sine", "prefit_sine") for b in self.blocks.values()):
+            return None  # already configured on the block
+        return None
+
     def as_forecast_state(
         self,
         *,
@@ -558,7 +517,6 @@ class WarpModel(nn.Module):
         calendar_full: Optional[Dict[str, np.ndarray]] = None,
         sine_fit: Optional[Dict[str, Any]] = None,
         n_train: Optional[int] = None,
-        # legacy kwargs
         z1_full: Optional[np.ndarray] = None,
         z2_full: Optional[np.ndarray] = None,
         x_full: Optional[np.ndarray] = None,
@@ -606,7 +564,9 @@ class WarpModel(nn.Module):
             sigma_t = float(self.sigma_t.detach())
             B = path.B.detach().cpu().numpy().copy()
         n_norm = int(self._fit_meta.get("n_calendar", n_train))
-        block_sample = next(iter(self.blocks.values())).sample if self.blocks else "array"
+        block_kind = (
+            next(iter(self.blocks.values())).covariate_kind if self.blocks else "array"
+        )
 
         def predict_train(p_tr: np.ndarray) -> np.ndarray:
             return self._predict_numpy(cov_full, cal_full, p_tr, n_train, sine_fit, n_norm)
@@ -633,7 +593,7 @@ class WarpModel(nn.Module):
             meta={
                 "kind": self._fit_meta.get("kind", "warp_model"),
                 "sine_fit": sine_fit,
-                "sample": block_sample,
+                "covariate_kind": block_kind,
             },
         )
 
@@ -646,6 +606,7 @@ class WarpModel(nn.Module):
         sine_fit: Optional[Dict[str, Any]],
         n_norm: int,
     ) -> np.ndarray:
+        """Numpy predict for forecast paths; may force analytic/prefit sine for expansion."""
         assert self.observation is not None
         p_t = torch.tensor(p[:n], dtype=torch.float32)
         cov_t: Dict[str, Tensor] = {}
@@ -660,24 +621,20 @@ class WarpModel(nn.Module):
             for k, v in cal_full.items()
             if len(v) >= n
         }
-        # Forecast extension: prefer analytic sine when configured
-        use_sine = sine_fit is not None and any(
-            b.sample in ("analytic_sine", "prefit_sine") for b in self.blocks.values()
+        force_kind = self._forecast_force_kind(sine_fit)
+        use_sine = force_kind is not None or (
+            sine_fit is not None
+            and any(b.covariate_kind in ("analytic_sine", "prefit_sine") for b in self.blocks.values())
         )
-        # Bitcoin: analytic sine for expansion even if train sample was array
-        if sine_fit is not None and self._fit_meta.get("kind") == "log_trend_sine":
-            use_sine = True
-            for b in self.blocks.values():
-                b.sample = "analytic_sine"
         with torch.no_grad():
             warped = self._warp_all(
-                cov_t, p_t, sine_fit=sine_fit if use_sine else None, n_norm=n_norm
+                cov_t,
+                p_t,
+                sine_fit=sine_fit if use_sine else None,
+                n_norm=n_norm,
+                force_kind=force_kind,
             )
             y_hat = self.observation(warped, cal_t)
-        # restore array sample for bitcoin train blocks
-        if self._fit_meta.get("kind") == "log_trend_sine":
-            for b in self.blocks.values():
-                b.sample = "array"
         return y_hat.detach().cpu().numpy()
 
     def forecast(
@@ -692,7 +649,6 @@ class WarpModel(nn.Module):
         covariates_full: Optional[Dict[str, np.ndarray]] = None,
         calendar_full: Optional[Dict[str, np.ndarray]] = None,
         sine_fit: Optional[Dict[str, Any]] = None,
-        # legacy
         x_train: Optional[Tensor] = None,
         z1_full: Optional[np.ndarray] = None,
         z2_full: Optional[np.ndarray] = None,
@@ -705,50 +661,38 @@ class WarpModel(nn.Module):
         del residual_horizon  # applied by caller via residual_smooth helpers
         cov = dict(covariates_full or {})
         if x_train is not None:
-            cov.setdefault("x", x_train.detach().cpu().numpy() if isinstance(x_train, Tensor) else x_train)
+            cov.setdefault(
+                "x",
+                x_train.detach().cpu().numpy() if isinstance(x_train, Tensor) else x_train,
+            )
         if z1_full is not None:
             cov["z1"] = z1_full
         if z2_full is not None:
             cov["z2"] = z2_full
         if z_full is not None:
             cov["z"] = z_full
+        for key in ("z1", "z2", "z", "x"):
+            if key in self._covariates and key not in cov:
+                cov[key] = self._covariates[key]
         cal = dict(calendar_full or {})
         if t_idx is not None:
             cal["t_idx"] = t_idx
         if t_norm is not None:
             cal["t_norm"] = t_norm
-        state = self.as_forecast_state(
-            covariates_full=cov or None,
-            calendar_full=cal or None,
-            sine_fit=sine_fit,
-            n_obs=n_obs,
-            z1_full=z1_full,
-            z2_full=z2_full,
-            z_full=z_full,
-            t_idx_full=t_idx,
-            t_norm_full=t_norm,
-            x_full=cov.get("x"),
-        )
-        # Ensure covariates cover forecast horizon for dual
-        n_tr = state.n_train
+
+        n_tr = int(n_obs if n_obs is not None else self.n)
         n_total = n_tr + int(n_future)
-        for key in list(self._covariates):
-            if key not in cov and key in ("z1", "z2", "z", "x"):
-                pass
-        if "z1" in self._covariates and "z1" not in cov:
-            cov["z1"] = self._covariates["z1"]
-        if "z2" in self._covariates and "z2" not in cov:
-            cov["z2"] = self._covariates["z2"]
-        if cov:
+        sf = sine_fit if sine_fit is not None else self._sine_fit
+        cal_use = cal if cal else self._calendar
+        if any(len(v) >= n_total for v in cov.values()) or cov:
+            state = self._build_forecast_state(cov, cal_use, n_tr, sf)
+        else:
             state = self.as_forecast_state(
-                covariates_full=cov,
-                calendar_full=cal if cal else None,
-                sine_fit=sine_fit,
-                n_train=n_tr,
+                covariates_full=cov or None,
+                calendar_full=cal or None,
+                sine_fit=sf,
+                n_obs=n_obs,
             )
-            # rebuild extend with full cov if long enough
-            if any(len(v) >= n_total for v in cov.values()):
-                state = self._build_forecast_state(cov, cal or self._calendar, n_tr, sine_fit or self._sine_fit)
 
         fc = forecast_from_state(
             state,
@@ -779,65 +723,3 @@ def _deep_merge(base: Dict[str, Any], over: Dict[str, Any]) -> Dict[str, Any]:
         else:
             out[k] = v
     return out
-
-
-class _LinearObsAdapter(nn.Module):
-    def __init__(self, obs: ObservationModel) -> None:
-        super().__init__()
-        self.obs = obs
-
-    def __call__(self, z1_w: Tensor, z2_w: Tensor) -> Tensor:  # type: ignore[override]
-        return self.obs({"z1": z1_w, "z2": z2_w}, {})
-
-
-class _MlpObsAdapter(nn.Module):
-    def __init__(self, obs: ObservationModel) -> None:
-        super().__init__()
-        self.obs = obs
-        # expose f/g like old dual nonlinear for cycle analysis
-        mlps = list(obs.mlps.values())
-        self.f = mlps[0] if mlps else None
-        self.g = mlps[1] if len(mlps) > 1 else None
-
-    def __call__(self, z1_w: Tensor, z2_w: Tensor) -> Tensor:  # type: ignore[override]
-        return self.obs({"z1": z1_w, "z2": z2_w}, {})
-
-
-class _AffineObsAdapter:
-    def __init__(self, obs: ObservationModel) -> None:
-        self.obs = obs
-
-
-class _BitcoinObsAdapter(nn.Module):
-    """Mimic WarpReadout.forward(t_idx, t_norm, z_w)."""
-
-    def __init__(self, obs: ObservationModel) -> None:
-        super().__init__()
-        self.obs = obs
-        self.B = obs.trend_B
-        self.C = obs.trend_C
-        self.zeta = obs.zeta
-        self.d_raw = obs.d_raw
-        self.f_net = obs.f_net
-
-    @property
-    def d(self) -> Tensor:
-        return self.obs.d
-
-    @property
-    def z_shift(self) -> Tensor:
-        return self.obs.z_shift
-
-    def trend_forward(self, t_idx: Tensor) -> Tensor:
-        assert self.B is not None and self.C is not None
-        return self.C + self.B * torch.log(t_idx - self.z_shift)
-
-    def atten(self, t_norm: Tensor) -> Tensor:
-        return 1.0 + self.d * (1.0 - t_norm)
-
-    def cyclic_forward(self, t_norm: Tensor, z_w: Tensor) -> Tensor:
-        assert self.f_net is not None
-        return self.f_net(t_norm) * self.atten(t_norm) * z_w
-
-    def forward(self, t_idx: Tensor, t_norm: Tensor, z_w: Tensor) -> Tensor:
-        return self.obs({"z": z_w}, {"t_idx": t_idx, "t_norm": t_norm})

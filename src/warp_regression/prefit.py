@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 
-from .constants import DEFAULT_PATH_ANCHOR, PathAnchor
+from .core.path import DEFAULT_PATH_ANCHOR, PathAnchor
 from .covariates.sine import (
     align_sine_to_macro_peaks,
     build_dual_sines_from_fit,
@@ -20,11 +20,12 @@ from .utilities.splits import cumsum_path_to_stored_path
 
 @dataclass
 class LogTrendAnalysis:
-    """Log-time trend fit: C + B·log(t_idx − z)."""
+    """Saturating log-time trend: C + B·log(u)/(1+γ·log(u)), u = t_idx − z."""
 
     B: float
     C: float
     z: float
+    gamma: float
     trend: np.ndarray
     residual: np.ndarray
     pin: Dict[str, Any]
@@ -34,10 +35,29 @@ def log_shifted_day_index(t_idx: np.ndarray, z: float) -> np.ndarray:
     return np.log(t_idx - z)
 
 
+def saturating_log_feature(log_t: np.ndarray, gamma: float) -> np.ndarray:
+    """log(u) / (1 + γ log(u)); γ=0 recovers plain log."""
+    g = float(max(gamma, 0.0))
+    if g <= 0.0:
+        return log_t
+    return log_t / (1.0 + g * log_t)
+
+
+def _satlog_denom_ok(log_t: np.ndarray, gamma: float, eps: float = 1e-6) -> bool:
+    g = float(max(gamma, 0.0))
+    if g <= 0.0:
+        return True
+    return bool(np.all(1.0 + g * log_t > eps))
+
+
 def _t_z_candidates() -> np.ndarray:
     near_one = 1.0 - np.exp(np.linspace(-8.0, -0.01, 40))
     negative = -np.exp(np.linspace(0.0, np.log(2000.0), 40))
     return np.concatenate([near_one, negative])
+
+
+def _gamma_candidates() -> np.ndarray:
+    return np.concatenate([[0.0], np.exp(np.linspace(np.log(1e-4), np.log(2.0), 28))])
 
 
 def analyze_log_trend(
@@ -45,39 +65,51 @@ def analyze_log_trend(
     t_idx: np.ndarray,
     *,
     z_grid: Optional[np.ndarray] = None,
+    gamma_grid: Optional[np.ndarray] = None,
 ) -> LogTrendAnalysis:
-    """Fit C + B·log(t_idx − z) and return trend + residual for sine prefit."""
+    """Fit C + B·satlog(t_idx − z; γ) and return trend + residual for sine prefit."""
     y = np.asarray(y, dtype=np.float64)
     t_idx = np.asarray(t_idx, dtype=np.float64)
     if z_grid is None:
         z_grid = _t_z_candidates()
+    if gamma_grid is None:
+        gamma_grid = _gamma_candidates()
     best_rss = np.inf
-    best: Optional[Tuple[float, float, float, np.ndarray]] = None
+    best: Optional[Tuple[float, float, float, float, np.ndarray]] = None
     for z in z_grid:
         if np.any(t_idx - z <= 0):
             continue
         log_t = log_shifted_day_index(t_idx, float(z))
-        X = np.column_stack([log_t, np.ones(len(y))])
-        coef, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
-        B, C = float(coef[0]), float(coef[1])
-        trend = C + B * log_t
-        rss = float(np.dot(y - trend, y - trend))
-        if rss < best_rss:
-            best_rss = rss
-            best = (B, C, float(z), trend)
+        for gamma in gamma_grid:
+            g = float(gamma)
+            if not _satlog_denom_ok(log_t, g):
+                continue
+            feat = saturating_log_feature(log_t, g)
+            X = np.column_stack([feat, np.ones(len(y))])
+            coef, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
+            B, C = float(coef[0]), float(coef[1])
+            trend = C + B * feat
+            rss = float(np.dot(y - trend, y - trend))
+            if rss < best_rss:
+                best_rss = rss
+                best = (B, C, float(z), g, trend)
     if best is None:
-        raise ValueError("no valid z in log(t − z) grid")
-    B, C, z, trend = best
+        raise ValueError("no valid (z, γ) in saturating-log grid")
+    B, C, z, gamma, trend = best
     z_global = z
+    gamma_global = gamma
     ep_before = float(abs(y[-1] - trend[-1]))
 
     def trend_at_z(zz: float) -> np.ndarray:
         if np.any(t_idx - zz <= 0):
             return trend
         log_t = log_shifted_day_index(t_idx, zz)
-        X = np.column_stack([log_t, np.ones(len(y))])
+        if not _satlog_denom_ok(log_t, gamma):
+            return trend
+        feat = saturating_log_feature(log_t, gamma)
+        X = np.column_stack([feat, np.ones(len(y))])
         coef, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
-        return coef[1] + coef[0] * log_t
+        return coef[1] + coef[0] * feat
 
     z_span = float(z_grid.max() - z_grid.min())
     z_refined, _, _ = refine_param_endpoint(
@@ -85,19 +117,25 @@ def analyze_log_trend(
     )
     if np.all(t_idx - z_refined > 0):
         log_t = log_shifted_day_index(t_idx, z_refined)
-        X = np.column_stack([log_t, np.ones(len(y))])
-        coef, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
-        B, C = float(coef[0]), float(coef[1])
-        trend = C + B * log_t
-        z = z_refined
+        if _satlog_denom_ok(log_t, gamma):
+            feat = saturating_log_feature(log_t, gamma)
+            X = np.column_stack([feat, np.ones(len(y))])
+            coef, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
+            B, C = float(coef[0]), float(coef[1])
+            trend = C + B * feat
+            z = z_refined
 
     pin = {
         "endpoint_before": ep_before,
         "endpoint_after": float(abs(y[-1] - trend[-1])),
         "z_before": z_global,
         "z_after": z,
+        "gamma_before": gamma_global,
+        "gamma": gamma,
     }
-    return LogTrendAnalysis(B=B, C=C, z=z, trend=trend, residual=y - trend, pin=pin)
+    return LogTrendAnalysis(
+        B=B, C=C, z=z, gamma=gamma, trend=trend, residual=y - trend, pin=pin
+    )
 
 
 def _prefit_one_sine(
@@ -188,17 +226,29 @@ def _prefit_one_sine_peaks(
         "z": z,
     }
     if envelope_init:
-        driver = t * z
-        denom = float(np.dot(driver, driver) + 1e-12)
-        f_init = float(np.dot(y, driver) / denom)
-        d_vals: List[float] = []
-        for pi in peak_idx:
-            env = (1.0 - t[pi]) * f_init * z[pi]
-            if abs(env) > 1e-6:
-                d_vals.append((y[pi] - f_init * z[pi]) / env)
-        d_init = float(max(np.median(d_vals), 0.0)) if d_vals else 0.0
+        # Exponential floor: atten(t) = a + (1−a)·exp(−κ t); at t=0 atten=1.
+        # When κ=0, atten≡1 for any a — only score a=1 on that slice.
+        a_grid = np.linspace(0.05, 1.0, 20)
+        kappa_grid = np.concatenate(
+            [[0.0], np.exp(np.linspace(np.log(0.05), np.log(5.0), 25))]
+        )
+        best_rss = np.inf
+        f_init, a_floor_init, kappa_init = 0.1, 1.0, 0.0
+        for kappa in kappa_grid:
+            a_vals = [1.0] if kappa <= 1e-12 else list(a_grid)
+            for a_floor in a_vals:
+                atten = a_floor + (1.0 - a_floor) * np.exp(-kappa * t)
+                driver = atten * z
+                denom = float(np.dot(driver, driver) + 1e-12)
+                f = float(np.dot(y, driver) / denom)
+                resid = y - f * driver
+                rss = float(np.dot(resid, resid))
+                if rss < best_rss:
+                    best_rss = rss
+                    f_init, a_floor_init, kappa_init = f, float(a_floor), float(kappa)
         out["f_init"] = f_init
-        out["d_init"] = d_init
+        out["a_floor_init"] = a_floor_init
+        out["kappa_init"] = kappa_init
     return out
 
 

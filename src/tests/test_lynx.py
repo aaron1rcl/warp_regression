@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import numpy as np
 
+from utils import prepare_lynx_log, split_lynx_holdout
 from warp_regression import (
     WarpModel,
     build_dual_sines_from_fit,
     fit_dual_sine_log,
-    prepare_lynx_log,
-    split_lynx_holdout,
 )
 
 
@@ -48,7 +47,7 @@ def test_lynx_holdout(baselines):
     )
     fit_res = model.fit(y_log[train_idx], covariates=cov_tr, sine_fit=sine_fit, B_init=B)
     model._covariates = {"z1": z1, "z2": z2}
-    model._fit["_y_log_train"] = y_log[train_idx]
+    model._fit["_y_train"] = y_log[train_idx]
     model._fit["_y_log_test"] = y_log[test_idx]
 
     assert fit_res.r2 >= cfg_b["train_r2"] - cfg_b["train_r2_tol"], f"train R²={fit_res.r2:.3f}"
