@@ -1,6 +1,6 @@
 # warp_regression
 
-Likelihood-based time warping for regression and forecasting on **cyclical** and **warped** series.
+Likelihood-based time warping for regression and forecasting on **cyclical** and **warped** series — including variable-duration response shapes (e.g. adstocked media effects).
 
 Motivation and modelling basis: [`blog_post.md`](blog_post.md).
 
@@ -60,7 +60,10 @@ In this repo:
 - **Synthetic** — a known sine pushed through a hidden path (grade recovery).  
 - **Lynx** — two sines share one warp: both components speed up or slow down together.  
 - **Bitcoin** — one macro cycle rides a strong log-trend; the path absorbs early/late peaks.  
-- **Fully Bayesian** — same dual geometry with PyMC + JAX / NumPyro posteriors.
+- **Fully Bayesian** — same dual geometry with PyMC + JAX / NumPyro posteriors.  
+- **Marketing mix (warped adstock)** — sparse spend → geometric adstock → pulse-pinned warp of media effects; terror masked when spend is off; Bayesian recovery of $A_m$, path, and $\sigma_t$; RW bridge draws for effect-length uncertainty.
+
+The MMM-style example is the non-cycle cousin of the same idea: the shape is the adstock decay, the clock is how long that decay lasts, and pins keep campaign onsets fixed while the path warps between them.
 
 ---
 
@@ -70,8 +73,9 @@ In this repo:
 
 - Separates shape ($x$, $f$) from timing ($p$, $\sigma_t$).  
 - One objective for fit and path plausibility; gradients end to end in PyTorch (JAX for Bayesian workflows).  
-- Forecast uncertainty includes *when*, via path sampling (terror / combined bands, cycle-length draws).  
-- Works at small-to-medium $n$ with a hand-specified cycle shape (Lynx-scale series are in scope).
+- Forecast uncertainty includes *when*, via path sampling (terror / combined bands, cycle-length / effect-length draws).  
+- Optional **pins** (identity at known indices) and **terror masks** for sparse drivers (e.g. media spend onsets).  
+- Works at small-to-medium $n$ with a hand-specified shape to warp (Lynx-scale series are in scope).
 
 **Compared with nearby tools.** Cyclical series (irregular phase, not ordinary seasonality) are hard to handle with packaged tooling. In particular, it is rare to get time warping, a proper regression likelihood, uncertainty over cycle lengths, and forecasts that sample future warp paths in one place. Neighbouring methods cover pieces of that list; getting all four usually means a custom research stack. More detail is in [`legacy/info/comparable_methods.md`](legacy/info/comparable_methods.md).
 
@@ -87,7 +91,7 @@ In this repo:
 
 **Deep sequence nets** forecast flexibly, yet they absorb timing into a black box, want a lot of data, and offer no explicit $\sigma_t$ or cycle-length law.
 
-**Use it** when the series is cyclical in the sense above: you have a plausible parametric shape, the clock slips relative to a fixed calendar, and you care about *when* the next peak arrives as much as how high it is. The examples in this repo (synthetic sine, Lynx, Bitcoin) sit in that regime—tens to a few thousand regularly spaced points—where a hand-specified cycle plus a low-dimensional path is still practical.
+**Use it** when the series is cyclical in the sense above: you have a plausible parametric shape, the clock slips relative to a fixed calendar, and you care about *when* the next peak arrives as much as how high it is. The same machinery also fits **warped response shapes** that are not cycles — for example adstocked media effects whose duration varies, with pulse onsets pinned and terror masked off-spend (notebook 5). The examples in this repo (synthetic sine, Lynx, Bitcoin, MMM demo) sit in that regime—tens to a few thousand regularly spaced points—where a hand-specified shape plus a low-dimensional path is still practical.
 
 **Skip it** when there is no shape worth warping (prefer a plain GP or a deep net); when you mainly need mature standard errors on long, high-frequency seasonal series (UCM or TBATS); when the task is aligning many signals rather than forecasting one (DTW or DTAN); when timestamps are irregular (GPs handle that natively; this package assumes a regular index); or when a research-only codebase is a non-starter for production.
 
@@ -136,6 +140,9 @@ For YAML models, dual loss, and forecast bands, see the notebooks and `WarpModel
 | [`2_Adding_complexity_Lynx_Forecast.ipynb`](examples/notebooks/2_Adding_complexity_Lynx_Forecast.ipynb) | Hudson Bay lynx: two sines, one shared warp, nonlinear readout, holdout forecast |
 | [`3_Bitcoin_Warp.ipynb`](examples/notebooks/3_Bitcoin_Warp.ipynb) | Daily BTC log-price: log-trend + envelope sine, cycle timing, out-of-sample bands |
 | [`4_Fully_Bayesian.ipynb`](examples/notebooks/4_Fully_Bayesian.ipynb) | Fully Bayesian dual model (PyMC + JAX / NumPyro): posteriors on $A$, $C$, path, and scales |
+| [`5_Marketing_Mix_Model_Warped_Effects.ipynb`](examples/notebooks/5_Marketing_Mix_Model_Warped_Effects.ipynb) | MMM-style: trend + seasonal + sparse spend → adstock → pinned warp; Bayesian $A_m$ / path / $\sigma_t$; RW bridges for effect length |
+| [`6_Gaussian_Process_Equivalent.ipynb`](examples/notebooks/6_Gaussian_Process_Equivalent.ipynb) | GP / input-warping comparison probe (HTML under `examples/html/`) |
+| [`7_Lynx_GP_Comparison.ipynb`](examples/notebooks/7_Lynx_GP_Comparison.ipynb) | Lynx vs GP comparison probe (HTML under `examples/html/`) |
 
 HTML under [`examples/html/`](examples/html/). Configs in [`examples/models/`](examples/models/).
 
@@ -150,7 +157,8 @@ HTML under [`examples/html/`](examples/html/). Configs in [`examples/models/`](e
 | `observation` | Term kinds for $f$ |
 | `forecast` | Path continuation and bands |
 | `prefit` | Covariates (e.g. sine) before `fit` |
-| `core` | Soft-warp, path geometry, dual / terror loss |
+| `core` | Soft-warp, path geometry (incl. multi-pin bridges), dual / terror loss |
+| `covariates` | Sine helpers; sparse / MMM utilities (`geometric_adstock`, `pulse_start_indices`, terror masks) |
 
 ```
 examples/notebooks/   tutorials

@@ -8,6 +8,7 @@ from .sine import (
     refine_param_endpoint,
     sine_from_fit,
 )
+from .sparse import geometric_adstock, pulse_start_indices, terror_mask_from_values
 
 __all__ = [
     "align_sine_to_macro_peaks",
@@ -16,4 +17,7 @@ __all__ = [
     "fit_dual_sine_log",
     "refine_param_endpoint",
     "sine_from_fit",
+    "geometric_adstock",
+    "pulse_start_indices",
+    "terror_mask_from_values",
 ]

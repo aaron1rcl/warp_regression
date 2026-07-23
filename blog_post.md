@@ -32,15 +32,23 @@ So $\lambda$ trades off ordinary fit (error, scale $\sigma_y$) against timing pl
 
 The loss function is differentiable and scalable, I've built it in this repo with PyTorch (and included a JAX version for Bayesian workflows).
 
-And more importantly, I think there are genuine real-life use cases for this technique. Time series with cyclical patterns (not seasonal) are very tricky to analyze with out-of-the-box tooling. I do not know of a single packaged tool that can do all of the following for cyclical series:
+And more importantly, I think there are genuine real-life use cases for this technique. Time series with cyclical patterns (not seasonal) are very tricky to analyze with out-of-the-box tooling — and so are response shapes whose *duration* wanders (media carry-over, lagged physiological effects, and so on). I do not know of a single packaged tool that can do all of the following for cyclical series:
 
 - Time warping
 - Parameterized for regression and inference
 - Proper uncertainty over cycle lengths
 - Forecasts that sample different warping paths — reflecting not only what will happen, but when
 
-{“Packaged / out-of-the-box” is the claim to defend — not “no paper has ever done a piece of this.”}
+To my knowledge, there are several similar approaches that could do one or more of these things. Gaussian processes, state-space models, DTW, and DTW style Neural Networks can do some of these things, but I think not all, and to my knowledge it requires highly customized, research-style approaches.
 
-Neighbouring methods cover pieces of that list. Gaussian processes, state-space models, DTW, and some DTW-style networks can each do one or more of these things, but to my knowledge getting all of them usually means a highly customized, research-style approach.
+To illustrate, I have put together examples which can be found in this repository:
 
-{Fair. Input-warped GPs (e.g. BoTorch `Warp`) are packaged but low-capacity; SSMs forecast with fixed seasonal frequencies; DTW aligns rather than sampling future warps. Overlap on pieces, rarely the full list.}
+1) A simple simulated, warped sinusoid  
+2) The famous Canadian lynx trapping dataset  
+3) Analysis of the Bitcoin price  
+4) A fully Bayesian implementation of (1)  
+5) A marketing-mix style demo: sparse spend → geometric adstock → **pinned** warp of media effects  
+
+That last one is a different flavour of the same idea. Classical MMM already stretches spend with an adstock (carry-over). What it usually does *not* do is let the **duration** of that effect wander as a generative timing process. Here the covariate is the already-adstocked series; pulse onsets stay fixed (`p[i]=i` at each spend start) so campaigns do not slide on the calendar, while the path between onsets can expand or compress. Terror is masked when spend is off, so timing is scored where the driver is active. A dual / Bayesian fit recovers the media amplitude and the warp; terror-scale random-walk bridges around the fitted path then give a distribution over **how long** a unit spend's effect might last — not only how large it is.
+
+So the checklist above is not only for cycles. Anywhere a known shape is stretched in time — a media decay, a physiological response, a logistics lag — a generative warp plus terror is a way to put *when* into the likelihood instead of burying it in the residual.

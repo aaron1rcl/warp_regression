@@ -9,8 +9,14 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
-from .core.path import DEFAULT_PATH_ANCHOR, PathAnchor
-from .core.path import path_from_B_torch
+from .core.path import (
+    DEFAULT_PATH_ANCHOR,
+    PathAnchor,
+    PinsLike,
+    normalize_pins,
+    path_from_B_torch,
+    pins_parameter_size,
+)
 from .core.training import terror_likelihood_torch, terror_path_for_likelihood_torch
 from .core.warp import (
     soft_warp_numpy,
@@ -38,6 +44,7 @@ class WarpPath(nn.Module):
         *,
         path_mode: str = "identity",
         path_anchor: PathAnchor = DEFAULT_PATH_ANCHOR,
+        pins: PinsLike = None,
         B_init: Optional[Union[Tensor, np.ndarray]] = None,
         log_sigma_t_init: float = -0.5,
     ) -> None:
@@ -46,12 +53,14 @@ class WarpPath(nn.Module):
         self.n_knots = int(n_knots)
         self.path_mode = path_mode
         self.path_anchor: PathAnchor = path_anchor
+        self.pins = normalize_pins(pins, self.n)
+        b_dim = pins_parameter_size(self.n, self.n_knots, self.pins)
         if B_init is None:
-            B0 = torch.zeros(n_knots)
+            B0 = torch.zeros(b_dim)
         else:
             B0 = torch.as_tensor(B_init, dtype=torch.float32).reshape(-1)
-            if B0.numel() != n_knots:
-                raise ValueError(f"B_init length {B0.numel()} != n_knots={n_knots}")
+            if B0.numel() != b_dim:
+                raise ValueError(f"B_init length {B0.numel()} != expected {b_dim}")
         self.B = nn.Parameter(B0.float())
         self.log_sigma_t = nn.Parameter(torch.tensor(float(log_sigma_t_init), dtype=torch.float32))
 
@@ -67,14 +76,22 @@ class WarpPath(nn.Module):
             self.n_knots,
             self.path_mode,
             path_anchor=self.path_anchor,
+            pins=self.pins,
         )
 
-    def terror_nll(self, p: Optional[Tensor] = None) -> Tensor:
+    def terror_nll(
+        self,
+        p: Optional[Tensor] = None,
+        *,
+        mask: Optional[Union[Tensor, np.ndarray]] = None,
+    ) -> Tensor:
         """Negative terror log-likelihood (−terror_ll) for dual loss."""
         if p is None:
             p = self.path()
         p_terror = terror_path_for_likelihood_torch(p, path_mode=self.path_mode)
-        return -terror_likelihood_torch(p_terror, self.sigma_t, self.n_knots)
+        return -terror_likelihood_torch(
+            p_terror, self.sigma_t, self.n_knots, mask=mask
+        )
 
     def sample_paths(
         self,

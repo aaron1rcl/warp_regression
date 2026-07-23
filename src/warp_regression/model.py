@@ -66,6 +66,8 @@ class WarpModel(nn.Module):
         self.path_anchor: PathAnchor = self.config.get("path_anchor", DEFAULT_PATH_ANCHOR)
         self.path_mode: str = self.config.get("path_mode", "identity")
         self.n_knots: int = int(self.config.get("n_knots", 8))
+        self._pins = self.config.get("pins")
+        self._terror_mask: Optional[np.ndarray] = None
         train = self.config.get("train", {})
         self.epochs = int(train.get("epochs", 1000))
         self.lr = float(train.get("lr", 0.03))
@@ -123,6 +125,7 @@ class WarpModel(nn.Module):
                 knots,
                 path_mode=self.path_mode,
                 path_anchor=self.path_anchor,
+                pins=spec.get("pins", self._pins),
                 B_init=b0,
             )
         for bspec in self.config.get("blocks", []):
@@ -343,11 +346,14 @@ class WarpModel(nn.Module):
                 path.n_knots,
                 lam,
                 path_mode=self.path_mode,
+                terror_mask=self._terror_mask,
             )
             for pg in self.path_groups.values():
                 if pg is path:
                     continue
-                loss = loss + (1.0 - lam) * pg.terror_nll(pg.path(n=n))
+                loss = loss + (1.0 - lam) * pg.terror_nll(
+                    pg.path(n=n), mask=self._terror_mask
+                )
             loss.backward()
             torch.nn.utils.clip_grad_norm_(params, max_norm=5.0)
             opt.step()
@@ -457,8 +463,15 @@ class WarpModel(nn.Module):
         fit_lambda: Optional[float] = None,
         seed: Optional[int] = None,
         years: Optional[np.ndarray] = None,
+        pins: Optional[Any] = None,
+        terror_mask: Optional[np.ndarray] = None,
     ) -> FitResult:
         del years  # prefit responsibility
+        if pins is not None:
+            self._pins = pins
+            self._built = False  # rebuild path groups with new pins
+        if terror_mask is not None:
+            self._terror_mask = np.asarray(terror_mask)
         y, covariates, calendar, n = self._prepare_fit_inputs(
             y, covariates, calendar, t_idx, t_norm, sine_fit, B_init
         )
