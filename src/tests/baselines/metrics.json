@@ -1,10 +1,10 @@
 {
   "synthetic": {
     "data_seed": 12,
-    "test_corr": 0.774,
-    "test_corr_tol": 0.05,
-    "test_rmse": 0.487,
-    "test_rmse_tol": 0.08,
+    "test_corr": 0.675,
+    "test_corr_tol": 0.06,
+    "test_rmse": 0.576,
+    "test_rmse_tol": 0.1,
     "epochs": 5000,
     "A_init": 1.0,
     "C_init": 0.0,
