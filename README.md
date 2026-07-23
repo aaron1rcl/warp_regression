@@ -57,7 +57,8 @@ Seasonality resets every January. A business cycle, predator–prey boom, or Bit
 
 In this repo:
 
-- **Synthetic** — a known sine pushed through a hidden path (grade recovery).  
+- **Warp block basics** — portable `WarpPath` / `WarpRegression` in plain PyTorch; recover a known expanding warp with error-only loss.  
+- **Synthetic** — end-to-end `WarpModel` on a known sine pushed through a hidden path (dual fit, path recovery, forecast bands).  
 - **Lynx** — two sines share one warp: both components speed up or slow down together.  
 - **Bitcoin** — one macro cycle rides a strong log-trend; the path absorbs early/late peaks.  
 - **Fully Bayesian** — same dual geometry with PyMC + JAX / NumPyro posteriors.  
@@ -69,32 +70,19 @@ The MMM-style example is the non-cycle cousin of the same idea: the shape is the
 
 ## Why use this — and when not to
 
-**Benefits**
+**Benefits:** shape ($x$, $f$) separate from timing ($p$, $\sigma_t$); one dual objective; forecast bands that include *when*; optional **pins** / **terror masks** for sparse drivers (MMM-style).
 
-- Separates shape ($x$, $f$) from timing ($p$, $\sigma_t$).  
-- One objective for fit and path plausibility; gradients end to end in PyTorch (JAX for Bayesian workflows).  
-- Forecast uncertainty includes *when*, via path sampling (terror / combined bands, cycle-length / effect-length draws).  
-- Optional **pins** (identity at known indices) and **terror masks** for sparse drivers (e.g. media spend onsets).  
-- Works at small-to-medium $n$ with a hand-specified shape to warp (Lynx-scale series are in scope).
+![Random-walk offsets with piecewise-linear path and Brownian bridges between knots](docs/terror_rw_pwl.png)
 
-**Compared with nearby tools.** Cyclical series (irregular phase, not ordinary seasonality) are hard to handle with packaged tooling. In particular, it is rare to get time warping, a proper regression likelihood, uncertainty over cycle lengths, and forecasts that sample future warp paths in one place. Neighbouring methods cover pieces of that list; getting all four usually means a custom research stack. More detail is in [`legacy/info/comparable_methods.md`](legacy/info/comparable_methods.md).
+*Terror story: a Gaussian random walk on timing offsets, fitted as a low-dimensional piecewise-linear path; bridges between knots are the likelihood geometry.*
 
-**DTW / soft-DTW** stretches time to align series, but it is fundamentally pattern matching (or a differentiable alignment loss). It does not give a generative timing law, a $\sigma_t$, or a natural way to sample future warps for regression and forecasting.
+![Soft-warp aligning a sine covariate to a warped target series](docs/warp_series_example.png)
 
-**Structural time series** (Harvey UCM, TBATS) do give cycles and Kalman-style probabilistic forecasts. Their cycle frequency is fixed at estimation time: phase can wander, but the period does not. On Lynx they are competitive on point forecasts while producing wider bands; series with two superimposed cycles need TBATS-style multi-seasonality or a hand-rolled state-space extension.
+*Soft-warp in action (notebook 0 style): recover the path so a known shape lines up with $y$.*
 
-**Gaussian processes** define a prior over functions through a covariance kernel, which gives flexible fits and predictive bands — but that prior is over values of $y$, not over phase warps. Methods that add warping (for example BoTorch's Kumaraswamy `Warp`) are not a warp kernel in that sense: they apply an input map $w(t)$ and then run an ordinary GP in the warped coordinates. You still do not get a generative law over cycle lengths or terror-style forecasts that sample future timing paths.
+Nearby tools (DTW, UCM/TBATS, GPs, neural warps) each cover pieces of warping / cycles / forecasts; getting generative timing + regression + cycle-length uncertainty in one place usually means a custom stack. Short survey: [`legacy/info/comparable_methods.md`](legacy/info/comparable_methods.md).
 
-**Custom GP or monotone-net warps** (latent speed fields, UMNN-style nets, and similar) can do phase-only timing in principle, but they are research DIY rather than one-liners. Warp uncertainty and cycle-length forecasts are extras you assemble on top.
-
-**Neural warping** methods such as DTAN learn monotone warps, but they are built to align ensembles of signals, not to forecast when the next peak of one series will land.
-
-**Deep sequence nets** forecast flexibly, yet they absorb timing into a black box, want a lot of data, and offer no explicit $\sigma_t$ or cycle-length law.
-
-**Use it** when the series is cyclical in the sense above: you have a plausible parametric shape, the clock slips relative to a fixed calendar, and you care about *when* the next peak arrives as much as how high it is. The same machinery also fits **warped response shapes** that are not cycles — for example adstocked media effects whose duration varies, with pulse onsets pinned and terror masked off-spend (notebook 5). The examples in this repo (synthetic sine, Lynx, Bitcoin, MMM demo) sit in that regime—tens to a few thousand regularly spaced points—where a hand-specified shape plus a low-dimensional path is still practical.
-
-**Skip it** when there is no shape worth warping (prefer a plain GP or a deep net); when you mainly need mature standard errors on long, high-frequency seasonal series (UCM or TBATS); when the task is aligning many signals rather than forecasting one (DTW or DTAN); when timestamps are irregular (GPs handle that natively; this package assumes a regular index); or when a research-only codebase is a non-starter for production.
-
+**Use it** for irregular cycles or warped response shapes (e.g. adstock duration) on regular, small-to-medium series where you care about *when* as much as *what*. **Skip it** for pure seasonal series, irregular timestamps, or when there is no shape worth warping.
 
 ---
 
@@ -108,7 +96,9 @@ pip install -e ".[bayes]"
 
 ## Quick start
 
-Minimal block — `WarpPath` + `WarpRegression` in ordinary PyTorch:
+Start with [`0_Warp_Block_Basics.ipynb`](examples/notebooks/0_Warp_Block_Basics.ipynb): a portable `WarpPath` + `WarpRegression` block in ordinary PyTorch, recovering a known expanding warp of a sine (error-only loss; dual / terror comes in notebook 1).
+
+Minimal sketch of that block:
 
 ```python
 import torch
@@ -127,7 +117,7 @@ p = path.path()                 # identity at init (B = 0)
 y_hat = A * warp.warp(x, p) + C
 ```
 
-For YAML models, dual loss, and forecast bands, see the notebooks and `WarpModel.from_yaml(...)`.
+For YAML models, dual loss, forecast bands, Bayesian sampling, and pinned / masked MMM-style warps, see notebooks 1–5 and `WarpModel.from_yaml(...)`.
 
 ---
 
@@ -135,16 +125,14 @@ For YAML models, dual loss, and forecast bands, see the notebooks and `WarpModel
 
 | Notebook | What it covers |
 |----------|----------------|
-| [`0_Warp_Block_Basics.ipynb`](examples/notebooks/0_Warp_Block_Basics.ipynb) | Portable `WarpPath` / `WarpRegression` block; error-only vs dual loss on a known warp |
+| [`0_Warp_Block_Basics.ipynb`](examples/notebooks/0_Warp_Block_Basics.ipynb) | Portable `WarpPath` / `WarpRegression` block; recover a known expanding warp (error-only) |
 | [`1_Introduction_to_Warp_Regression.ipynb`](examples/notebooks/1_Introduction_to_Warp_Regression.ipynb) | End-to-end `WarpModel` on synthetic sine: prefit, dual fit, path recovery, forecast bands |
 | [`2_Adding_complexity_Lynx_Forecast.ipynb`](examples/notebooks/2_Adding_complexity_Lynx_Forecast.ipynb) | Hudson Bay lynx: two sines, one shared warp, nonlinear readout, holdout forecast |
 | [`3_Bitcoin_Warp.ipynb`](examples/notebooks/3_Bitcoin_Warp.ipynb) | Daily BTC log-price: log-trend + envelope sine, cycle timing, out-of-sample bands |
 | [`4_Fully_Bayesian.ipynb`](examples/notebooks/4_Fully_Bayesian.ipynb) | Fully Bayesian dual model (PyMC + JAX / NumPyro): posteriors on $A$, $C$, path, and scales |
 | [`5_Marketing_Mix_Model_Warped_Effects.ipynb`](examples/notebooks/5_Marketing_Mix_Model_Warped_Effects.ipynb) | MMM-style: trend + seasonal + sparse spend → adstock → pinned warp; Bayesian $A_m$ / path / $\sigma_t$; RW bridges for effect length |
-| [`6_Gaussian_Process_Equivalent.ipynb`](examples/notebooks/6_Gaussian_Process_Equivalent.ipynb) | GP / input-warping comparison probe (HTML under `examples/html/`) |
-| [`7_Lynx_GP_Comparison.ipynb`](examples/notebooks/7_Lynx_GP_Comparison.ipynb) | Lynx vs GP comparison probe (HTML under `examples/html/`) |
 
-HTML under [`examples/html/`](examples/html/). Configs in [`examples/models/`](examples/models/).
+HTML under [`examples/html/`](examples/html/). Configs in [`examples/models/`](examples/models/). Motivation write-up: [`blog_post.md`](blog_post.md).
 
 ---
 
