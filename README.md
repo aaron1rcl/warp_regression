@@ -2,21 +2,27 @@
 
 Likelihood-based time warping for regression and forecasting on **cyclical** series — cycles whose timing drifts, not just their height.
 
+Motivation and modelling basis: [`blog_post.md`](blog_post.md).
+
 ---
 
 ## What is warp regression?
 
-For a while the interesting idea has been to model errors in the **time** dimension explicitly, not only on the $y$-axis. If your parcel arrives a day late, you do not say you are one package short. The mistake is *when*, not *how many*. Most time-series tools still dump timing mistakes into the residual on $y$. Warp regression keeps them separate: a path $p$ says *when* a known shape arrives; an observation model $\mu$ says *what level* you see once it has arrived.
+Most ML sticks to **$y$-axis** error. Real timing mistakes are often about *when*: a train ten minutes late, a parcel a day after the promised window. Errors-in-variables already puts noise on inputs; warp regression asks whether **time** error can sit in a regression model explicitly, instead of being dumped into the residual on $y$.
+
+That matters for **warped** or **cyclical** series (irregular phase — not the same as seasonality). Dynamic time warping is common, but it is mainly pattern matching: it does not easily give regression, inference, or forecasts of future timing. The bet here is a **generative** warp: an input series $x$ is deformed by slow expansions and contractions; we score that deformation with its own likelihood (**terror** = *t*iming *error*), and fit it jointly with ordinary observation error.
 
 At each index $i$,
 
 $$
-\hat{y}_i = \mu\big(\mathrm{warp}(x, p)_i\big),
+\hat{y}_i = f\big(\mathrm{warp}(x, p)_i\big),
 $$
 
-where $x$ is a covariate (often a sine or other known shape), $p$ is a low-dimensional warp path (fractional indices into $x$), and $\mu$ is linear, an MLP, trend + cycle, …. Soft-warp interpolates $x$ at those indices so $p$ is differentiable.
+where $x$ is a covariate (often a sine or other known shape), $p$ is a low-dimensional warp path (fractional indices into $x$), and $f$ is linear, an MLP, trend + cycle, …. Soft-warp interpolates $x$ at those indices so $p$ is differentiable.
 
 ### Terror (timing error)
+
+Timing is modelled as a **Gaussian random walk** on path offsets — not the only option, but a simple generative way to let the series drift early and late, with scale $\sigma_t$. A free random walk at every index is infeasible (jagged, one parameter per observation). So the fitted path is **piecewise linear through $K \ll n$ knots**. Terror is the **expected log-likelihood of a Brownian bridge** on each knot segment (`expected_likelihood`): $O(K)$, autograd-friendly, and still tied to the RW story used for forecast path sampling.
 
 Training uses a **dual likelihood**:
 
@@ -24,8 +30,6 @@ Training uses a **dual likelihood**:
 |------|-------|---------|
 | **error** | $\sigma_y$ | Usual Gaussian fit of $y$ vs $\hat{y}$ |
 | **terror** | $\sigma_t$ | Likelihood on path offsets $p(i) - i$ — how plausible is this timing? |
-
-(*Terror* = **t**iming **error**.) The objective mixes them with weight $\lambda$ (`fit_lambda`):
 
 $$
 \mathcal{J} = \lambda \cdot (-\log p(y \mid \hat{y},\sigma_y)) - (1-\lambda)\cdot \log p(p \mid \sigma_t).
@@ -36,10 +40,6 @@ $$
 | $0.5$ | Equal weight on both log-likelihoods — the natural joint (neither term preferred *a priori*) |
 | $\to 1$ | Fit only: terror off; the path may warp freely to reduce residual error |
 | $\to 0$ | Terror only: timing prior dominates; $y$-fit is barely scored |
-
-**What is the terror likelihood?** Timing is scored as a Gaussian random walk on offsets, with scale $\sigma_t$: the clock is allowed to drift early/late from segment to segment. A literal free random-walk path would be *rough* (Brownian paths are almost surely nowhere differentiable; a discrete RW is jagged) and would need a free value at every index — too many degrees of freedom for a useful warp.
-
-So the fitted path is **piecewise linear through $K \ll n$ knots**. Terror is the **expected log-likelihood of a Brownian bridge** on each knot segment: integrate out the unknown rough path between the two knot endpoints, given their displacement and $\sigma_t$. That closed form (`expected_likelihood`) is $O(K)$, autograd-friendly, and keeps the RW generative story (including forecast path sampling) without optimizing a jagged path.
 
 Because timing has its own scale, forecasts can continue the warp as a random walk and build:
 
@@ -53,15 +53,14 @@ That is also how you get a distribution over *next cycle length*, not only next 
 
 ## Cyclical ≠ seasonal
 
-Macro and ecological series often look periodic without a fixed calendar phase: business cycles, commodity booms, predator–prey peaks, Bitcoin’s ~4-year halving rhythm. These are **cyclical, not seasonal**. Seasonality resets every January; a cycle can run long or short. The *shape* recurs; the *clock* slips.
+Seasonality resets every January. A business cycle, predator–prey boom, or Bitcoin’s ~4-year rhythm can run long or short: the *shape* recurs; the *clock* slips. Packaged tooling rarely gives all of: time warping, regression/inference, uncertainty over cycle lengths, and forecasts that sample different warping paths (*what* and *when*). GPs, state-space models, DTW, and DTW-style nets cover pieces of that list; getting all of them usually means a custom research pipeline.
 
-In this repo that warping shows up as:
+In this repo:
 
 - **Synthetic** — a known sine pushed through a hidden path (grade recovery).  
 - **Lynx** — two sines share one warp: both components speed up or slow down together.  
-- **Bitcoin** — one macro cycle rides a strong log-trend; the path absorbs early/late peaks.
-
-In practice those series are hard to (1) **analyse** without forcing a fixed period, (2) **forecast** when the next peak’s date is the question, and (3) attach honest **uncertainty** to cycle timing rather than only to level.
+- **Bitcoin** — one macro cycle rides a strong log-trend; the path absorbs early/late peaks.  
+- **Fully Bayesian** — same dual geometry with PyMC + JAX / NumPyro posteriors.
 
 ---
 
@@ -69,8 +68,8 @@ In practice those series are hard to (1) **analyse** without forcing a fixed per
 
 **Benefits**
 
-- Separates shape ($x$, $\mu$) from timing ($p$, $\sigma_t$).  
-- One objective for fit and path plausibility; gradients end to end in PyTorch.  
+- Separates shape ($x$, $f$) from timing ($p$, $\sigma_t$).  
+- One objective for fit and path plausibility; gradients end to end in PyTorch (JAX for Bayesian workflows).  
 - Forecast uncertainty includes *when*, via path sampling (terror / combined bands, cycle-length draws).  
 - Works at small-to-medium $n$ with a hand-specified cycle shape (Lynx-scale series are in scope).
 
@@ -78,10 +77,10 @@ In practice those series are hard to (1) **analyse** without forcing a fixed per
 
 | Approach | Overlap | Gap vs warp regression |
 |----------|---------|------------------------|
-| **DTW / soft-DTW** | Aligns by stretching time | Optimisation path, not a generative timing law — weak for forecasts / $\sigma_t$ |
+| **DTW / soft-DTW** | Aligns by stretching time | Optimisation / alignment, not a generative timing law — weak for forecasts / $\sigma_t$ |
 | **Structural TS / TBATS** | Cycles + probabilistic forecasts | Fixed frequency; phase wanders, period does not |
 | **Neural warping (DTAN, …)** | Learned warps | Built for alignment / ensembles, not cycle-length forecasts |
-| **GPs / deep sequence nets** | Flexible forecasts | Timing absorbed into the black box; no explicit path |
+| **GPs / deep sequence nets** | Flexible forecasts | Timing often absorbed into the black box; no explicit path-RW cycle forecasts |
 
 **Use it** when you have a plausible parametric shape, timing drifts off a fixed calendar, sample size is tens to a few thousand points, and “when does the next peak land?” matters as much as “how high?”.
 
@@ -141,8 +140,8 @@ HTML under [`examples/html/`](examples/html/). Configs in [`examples/models/`](e
 | Piece | Role |
 |-------|------|
 | `WarpPath` / `WarpRegression` | Portable warp block |
-| `WarpModel` | Paths, blocks, observation $\mu$, dual fit, forecast |
-| `observation` | Term kinds for $\mu$ |
+| `WarpModel` | Paths, blocks, observation $f$, dual fit, forecast |
+| `observation` | Term kinds for $f$ |
 | `forecast` | Path continuation and bands |
 | `prefit` | Covariates (e.g. sine) before `fit` |
 | `core` | Soft-warp, path geometry, dual / terror loss |

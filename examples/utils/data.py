@@ -302,12 +302,17 @@ def generate_sample_perturbations(
 def build_synthetic_dataset(
     n: int = 300,
     sr: int = 10,
-    scale: float = 10.0,
+    scale: float = 15.0,
     noise_std: float = 0.2,
     truncate_perturbations: bool = False,
     seed: int = 12,
 ) -> Dict[str, Any]:
-    """Run WarpPureNumpy.ipynb cells 4–7: warp sin(phase), not raw phase."""
+    """Run WarpPureNumpy.ipynb cells 4–7: warp sin(phase), not raw phase.
+
+    ``scale`` controls the hidden RW step size (``Normal(0, scale-1)`` then
+    integerized). Default 15 makes calendar ``x`` vs ``y`` clearly mistimed
+    while remaining recoverable by the soft-warp model.
+    """
     _, x, y_clean = generate_example_waves(n, seed=seed)
     p_step, p_true = generate_sample_perturbations(scale, n, truncate=truncate_perturbations, sr=sr)
     X = matrix_decomp(x, n, sr)
