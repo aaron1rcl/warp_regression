@@ -8079,6 +8079,9 @@ Train indices 0-180 (n=181)  |  Test indices 181-299 (n=119)
 <div class="jp-InputArea jp-Cell-inputArea"><div class="jp-InputPrompt jp-InputArea-prompt">
 </div><div class="jp-RenderedHTMLCommon jp-RenderedMarkdown jp-MarkdownOutput" data-mime-type="text/markdown">
 <h2 id="Step-3:-joint-training">Step 3: joint training<a class="anchor-link" href="#Step-3:-joint-training">¶</a></h2><p>Learn path knots $B$, amplitude $A$, bias $C$, and scales $\sigma_t$, $\sigma_y$ together under the dual loss. The path is <strong>start-pinned</strong> ($p[0]=0$) so the train end can move. The covariate sine is evaluated on an <strong>extended</strong> calendar so expansion can read future cycle values.</p>
+<p>The synthetic series was generated as</p>
+<p>$$y = 1\cdot \mathrm{warp}(x, p_{\mathrm{true}}) + 0 + \varepsilon,\qquad \varepsilon\sim\mathcal{N}(0, 0.2^2)$$</p>
+<p>so the ground truth is $A=1$, $C=0$, $\sigma_y=0.2$. After fitting we compare the recovered values to those targets. $A$ and $C$ are identified against the <strong>prefit</strong> driver (not raw $x$), so small deviations are expected; $\sigma_y$ and the in-sample correlation are the cleaner quality checks.</p>
 </div>
 </div>
 </div>
@@ -8110,13 +8113,28 @@ Train indices 0-180 (n=181)  |  Test indices 181-299 (n=119)
 
 <span class="k">with</span> <span class="n">torch</span><span class="o">.</span><span class="n">no_grad</span><span class="p">():</span>
     <span class="n">sigma_t</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">sigma_t</span><span class="p">)</span>
+    <span class="n">sigma_y</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">model</span><span class="o">.</span><span class="n">sigma_y</span><span class="p">)</span>
+    <span class="n">lin</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">observation</span><span class="o">.</span><span class="n">_linear</span>
+    <span class="n">A_hat</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">lin</span><span class="o">.</span><span class="n">A</span><span class="o">.</span><span class="n">detach</span><span class="p">())</span>
+    <span class="n">C_hat</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">lin</span><span class="o">.</span><span class="n">C</span><span class="o">.</span><span class="n">detach</span><span class="p">())</span>
     <span class="n">p_fit</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">primary_path</span><span class="o">.</span><span class="n">path</span><span class="p">()</span><span class="o">.</span><span class="n">numpy</span><span class="p">()</span>
     <span class="n">y_hat_t</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="n">model</span><span class="o">.</span><span class="n">predict_torch</span><span class="p">(</span>
         <span class="p">{</span><span class="s2">"x"</span><span class="p">:</span> <span class="n">x_train</span><span class="p">},</span> <span class="p">{},</span> <span class="n">p</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">tensor</span><span class="p">(</span><span class="n">p_fit</span><span class="p">),</span> <span class="n">sine_fit</span><span class="o">=</span><span class="n">sine_fit</span>
     <span class="p">)</span>
     <span class="n">y_hat_tr</span> <span class="o">=</span> <span class="n">y_hat_t</span><span class="o">.</span><span class="n">numpy</span><span class="p">()</span>
+
 <span class="n">report</span> <span class="o">=</span> <span class="n">evaluate_model</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">y_np</span><span class="p">,</span> <span class="n">x</span><span class="o">=</span><span class="n">x_ext</span><span class="p">,</span> <span class="n">use_discrete_warp</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
-<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"σ_t=</span><span class="si">{</span><span class="n">sigma_t</span><span class="si">:</span><span class="s2">.4f</span><span class="si">}</span><span class="s2">  terminal offset=</span><span class="si">{</span><span class="n">p_fit</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span><span class="o">-</span><span class="p">(</span><span class="n">n_train</span><span class="o">-</span><span class="mi">1</span><span class="p">)</span><span class="si">:</span><span class="s2">.3f</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+
+<span class="n">A_true</span><span class="p">,</span> <span class="n">C_true</span><span class="p">,</span> <span class="n">sy_true</span> <span class="o">=</span> <span class="mf">1.0</span><span class="p">,</span> <span class="mf">0.0</span><span class="p">,</span> <span class="nb">float</span><span class="p">(</span><span class="n">data</span><span class="p">[</span><span class="s2">"noise_std"</span><span class="p">])</span>
+<span class="nb">print</span><span class="p">(</span><span class="s2">"Recovered vs true generative targets (A, C relative to prefit driver)"</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"  A      </span><span class="si">{</span><span class="n">A_hat</span><span class="si">:</span><span class="s2">7.3f</span><span class="si">}</span><span class="s2">   target </span><span class="si">{</span><span class="n">A_true</span><span class="si">:</span><span class="s2">.1f</span><span class="si">}</span><span class="s2">   |err|=</span><span class="si">{</span><span class="nb">abs</span><span class="p">(</span><span class="n">A_hat</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">A_true</span><span class="p">)</span><span class="si">:</span><span class="s2">.3f</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"  C      </span><span class="si">{</span><span class="n">C_hat</span><span class="si">:</span><span class="s2">7.3f</span><span class="si">}</span><span class="s2">   target </span><span class="si">{</span><span class="n">C_true</span><span class="si">:</span><span class="s2">.1f</span><span class="si">}</span><span class="s2">   |err|=</span><span class="si">{</span><span class="nb">abs</span><span class="p">(</span><span class="n">C_hat</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">C_true</span><span class="p">)</span><span class="si">:</span><span class="s2">.3f</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"  σ_y    </span><span class="si">{</span><span class="n">sigma_y</span><span class="si">:</span><span class="s2">7.3f</span><span class="si">}</span><span class="s2">   true   </span><span class="si">{</span><span class="n">sy_true</span><span class="si">:</span><span class="s2">.1f</span><span class="si">}</span><span class="s2">   |err|=</span><span class="si">{</span><span class="nb">abs</span><span class="p">(</span><span class="n">sigma_y</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">sy_true</span><span class="p">)</span><span class="si">:</span><span class="s2">.3f</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"  σ_t    </span><span class="si">{</span><span class="n">sigma_t</span><span class="si">:</span><span class="s2">7.3f</span><span class="si">}</span><span class="s2">   (learned timing scale)"</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span>
+    <span class="sa">f</span><span class="s2">"Fit quality: corr=</span><span class="si">{</span><span class="n">report</span><span class="o">.</span><span class="n">corr</span><span class="si">:</span><span class="s2">.3f</span><span class="si">}</span><span class="s2">  rmse=</span><span class="si">{</span><span class="n">report</span><span class="o">.</span><span class="n">rmse</span><span class="si">:</span><span class="s2">.3f</span><span class="si">}</span><span class="s2">  "</span>
+    <span class="sa">f</span><span class="s2">"(noise floor ≈ </span><span class="si">{</span><span class="n">sy_true</span><span class="si">:</span><span class="s2">.1f</span><span class="si">}</span><span class="s2">)  terminal offset=</span><span class="si">{</span><span class="n">p_fit</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="p">(</span><span class="n">n_train</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="si">:</span><span class="s2">.3f</span><span class="si">}</span><span class="s2">"</span>
+<span class="p">)</span>
 <span class="nb">print</span><span class="p">(</span><span class="n">report</span><span class="p">)</span>
 </pre></div>
 </div>
@@ -8130,7 +8148,12 @@ Train indices 0-180 (n=181)  |  Test indices 181-299 (n=119)
 <div class="jp-OutputArea-child">
 <div class="jp-OutputPrompt jp-OutputArea-prompt"></div>
 <div class="jp-RenderedText jp-OutputArea-output" data-mime-type="text/plain" tabindex="0">
-<pre>σ_t=0.1630  terminal offset=2.081
+<pre>Recovered vs true generative targets (A, C relative to prefit driver)
+  A        0.824   target 1.0   |err|=0.176
+  C        0.153   target 0.0   |err|=0.153
+  σ_y      0.248   true 0.2   |err|=0.048
+  σ_t      0.163   (learned timing scale)
+Fit quality: corr=0.914  rmse=0.248  (noise floor ≈ 0.2)  terminal offset=2.081
 EvalReport(mse=0.061268618289255346, rmse=0.24752498518181018, corr=0.9140969681663751, obj_err=4.10775899887085, obj_time=0.4015570282936096, err_nll=-4.10775899887085, time_ll=-0.4015570282936096, ll_distance=None, discrete_mse=0.061268617065375515)
 </pre>
 </div>
@@ -8144,7 +8167,7 @@ EvalReport(mse=0.061268618289255346, rmse=0.24752498518181018, corr=0.9140969681
 </div>
 <div class="jp-InputArea jp-Cell-inputArea"><div class="jp-InputPrompt jp-InputArea-prompt">
 </div><div class="jp-RenderedHTMLCommon jp-RenderedMarkdown jp-MarkdownOutput" data-mime-type="text/markdown">
-<h2 id="Step-4:-did-the-warp-recover?">Step 4: did the warp recover?<a class="anchor-link" href="#Step-4:-did-the-warp-recover?">¶</a></h2><p>On synthetic data we know the true path. Compare the fitted curve, $p$, and offsets $p(i)-i$ to ground truth.</p>
+<h2 id="Step-4:-did-the-warp-recover?">Step 4: did the warp recover?<a class="anchor-link" href="#Step-4:-did-the-warp-recover?">¶</a></h2><p>On synthetic data we know the true path. Compare the fitted curve and coordinate $p$ to ground truth.</p>
 </div>
 </div>
 </div>

@@ -1,6 +1,6 @@
 # warp_regression
 
-Likelihood-based time warping for regression and forecasting on **cyclical** series — cycles whose timing drifts, not just their height.
+Likelihood-based time warping for regression and forecasting on **cyclical** and **warped** series.
 
 Motivation and modelling basis: [`blog_post.md`](blog_post.md).
 
@@ -73,18 +73,24 @@ In this repo:
 - Forecast uncertainty includes *when*, via path sampling (terror / combined bands, cycle-length draws).  
 - Works at small-to-medium $n$ with a hand-specified cycle shape (Lynx-scale series are in scope).
 
-**Compared with nearby tools** (detail in [`legacy/info/comparable_methods.md`](legacy/info/comparable_methods.md)):
+**Compared with nearby tools.** Cyclical series (irregular phase, not ordinary seasonality) are hard to handle with packaged tooling. In particular, it is rare to get time warping, a proper regression likelihood, uncertainty over cycle lengths, and forecasts that sample future warp paths in one place. Neighbouring methods cover pieces of that list; getting all four usually means a custom research stack. More detail is in [`legacy/info/comparable_methods.md`](legacy/info/comparable_methods.md).
 
-| Approach | Overlap | Gap vs warp regression |
-|----------|---------|------------------------|
-| **DTW / soft-DTW** | Aligns by stretching time | Optimisation / alignment, not a generative timing law — weak for forecasts / $\sigma_t$ |
-| **Structural TS / TBATS** | Cycles + probabilistic forecasts | Fixed frequency; phase wanders, period does not |
-| **Neural warping (DTAN, …)** | Learned warps | Built for alignment / ensembles, not cycle-length forecasts |
-| **GPs / deep sequence nets** | Flexible forecasts | Timing often absorbed into the black box; no explicit path-RW cycle forecasts |
+**DTW / soft-DTW** stretches time to align series, but it is fundamentally pattern matching (or a differentiable alignment loss). It does not give a generative timing law, a $\sigma_t$, or a natural way to sample future warps for regression and forecasting.
 
-**Use it** when you have a plausible parametric shape, timing drifts off a fixed calendar, sample size is tens to a few thousand points, and “when does the next peak land?” matters as much as “how high?”.
+**Structural time series** (Harvey UCM, TBATS) do give cycles and Kalman-style probabilistic forecasts. Their cycle frequency is fixed at estimation time: phase can wander, but the period does not. On Lynx they are competitive on point forecasts while producing wider bands; series with two superimposed cycles need TBATS-style multi-seasonality or a hand-rolled state-space extension.
 
-**Skip it** when there is no shape to warp (use a GP or deep net); when you need mature SEs and textbook tooling on long high-frequency series (UCM / TBATS); when the task is aligning many signals, not forecasting one (DTW); when timestamps are irregular (GPs handle that natively; this package assumes a regular index); or when a research-only repo is disqualifying for production.
+**Gaussian processes** define a prior over functions through a covariance kernel, which gives flexible fits and predictive bands — but that prior is over values of $y$, not over phase warps. Methods that add warping (for example BoTorch's Kumaraswamy `Warp`) are not a warp kernel in that sense: they apply an input map $w(t)$ and then run an ordinary GP in the warped coordinates. You still do not get a generative law over cycle lengths or terror-style forecasts that sample future timing paths.
+
+**Custom GP or monotone-net warps** (latent speed fields, UMNN-style nets, and similar) can do phase-only timing in principle, but they are research DIY rather than one-liners. Warp uncertainty and cycle-length forecasts are extras you assemble on top.
+
+**Neural warping** methods such as DTAN learn monotone warps, but they are built to align ensembles of signals, not to forecast when the next peak of one series will land.
+
+**Deep sequence nets** forecast flexibly, yet they absorb timing into a black box, want a lot of data, and offer no explicit $\sigma_t$ or cycle-length law.
+
+**Use it** when the series is cyclical in the sense above: you have a plausible parametric shape, the clock slips relative to a fixed calendar, and you care about *when* the next peak arrives as much as how high it is. The examples in this repo (synthetic sine, Lynx, Bitcoin) sit in that regime—tens to a few thousand regularly spaced points—where a hand-specified cycle plus a low-dimensional path is still practical.
+
+**Skip it** when there is no shape worth warping (prefer a plain GP or a deep net); when you mainly need mature standard errors on long, high-frequency seasonal series (UCM or TBATS); when the task is aligning many signals rather than forecasting one (DTW or DTAN); when timestamps are irregular (GPs handle that natively; this package assumes a regular index); or when a research-only codebase is a non-starter for production.
+
 
 ---
 
