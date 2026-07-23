@@ -4,7 +4,9 @@ For quite some time I've been interested in the idea of 'time' error, i.e. early
 
 This is especially interesting to me in the case of time-series modelling. Warped series or cyclical variables with irregular phase are somewhat common in the real world, but painfully difficult to solve. 
 
-{insert the bitcoin log series as an example image}
+![Bitcoin log price over time](docs/bitcoin_log_price.png)
+
+*Bitcoin: a real world example with irregular cyclical behaviour*
 
 Dynamic time warping is common in the field, but it's more of a pattern-matching tool. It doesn't easily support regression models, inference, or forecasting. Can we build something similar that explicitly models the warping as a generative process?*
 
