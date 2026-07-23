@@ -61,6 +61,11 @@ from .covariates.sine import (
     sine_from_fit,
     eval_sine_driver,
 )
+from .covariates.sparse import (
+    geometric_adstock,
+    pulse_start_indices,
+    terror_mask_from_values,
+)
 from .utilities.splits import cumsum_path_to_stored_path, split_holdout
 from .utilities.metrics import EvalReport
 
@@ -114,4 +119,7 @@ __all__ = [
     "build_dual_sines_from_fit",
     "soft_warp_numpy",
     "soft_warp_sine_numpy",
+    "geometric_adstock",
+    "pulse_start_indices",
+    "terror_mask_from_values",
 ]

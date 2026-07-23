@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -81,16 +81,44 @@ def expected_likelihood_torch(d: Tensor, sd: Tensor, n_steps: float) -> Tensor:
     return reverse_softplus_torch(el * n_steps)
 
 
-def terror_likelihood_torch(p: Tensor, sigma_t: Tensor, n_knots: int) -> Tensor:
-    """Sum of expected segment likelihoods along the warp offsets ``p``."""
+def terror_likelihood_torch(
+    p: Tensor,
+    sigma_t: Tensor,
+    n_knots: int,
+    mask: Optional[Union[Tensor, np.ndarray]] = None,
+) -> Tensor:
+    """Sum of expected segment likelihoods along the warp offsets ``p``.
+
+    Optional ``mask`` (length ``n``, bool or float): segment ``[x1, x2]`` is
+    weighted by the mean mask on ``(x1, x2]`` (skipped if the mean is 0).
+    """
     n = int(p.shape[0])
     k_values, rw_width = terror_knot_values(n, n_knots)
     k_values = np.append(k_values, n - 1.0)
+    w = None
+    if mask is not None:
+        if isinstance(mask, np.ndarray):
+            w = torch.as_tensor(mask, device=p.device, dtype=p.dtype).reshape(-1)
+        else:
+            w = mask.to(device=p.device, dtype=p.dtype).reshape(-1)
+        if int(w.shape[0]) != n:
+            raise ValueError(f"terror mask length {int(w.shape[0])} != n={n}")
     total = torch.zeros((), device=p.device, dtype=p.dtype)
     for i in range(1, len(k_values)):
         x1, x2 = int(k_values[i - 1]), int(k_values[i])
+        weight = 1.0
+        if w is not None:
+            lo = min(x1 + 1, x2)
+            hi = x2 + 1
+            if hi <= lo:
+                seg = w[x1 : x2 + 1]
+            else:
+                seg = w[lo:hi]
+            weight = float(seg.mean().detach()) if seg.numel() else 0.0
+            if weight <= 0.0:
+                continue
         d = p[x2] - p[x1]
-        total = total + expected_likelihood_torch(d, sigma_t, rw_width)
+        total = total + weight * expected_likelihood_torch(d, sigma_t, rw_width)
     return total
 
 
@@ -113,12 +141,13 @@ def compute_dual_loss(
     lam: float,
     path_mode: str = "identity",
     sample_weights: Optional[Tensor] = None,
+    terror_mask: Optional[Union[Tensor, np.ndarray]] = None,
 ) -> Tuple[Tensor, DualLossValues]:
     sigma_y = torch.exp(log_sigma)
     sigma_t = torch.exp(log_sigma_t)
     obj_err = gaussian_error_nll(y - y_hat, sigma_y, sample_weights)
     p_terror = terror_path_for_likelihood_torch(p, path_mode=path_mode)
-    terror_ll = terror_likelihood_torch(p_terror, sigma_t, n_knots)
+    terror_ll = terror_likelihood_torch(p_terror, sigma_t, n_knots, mask=terror_mask)
     loss = lam * obj_err - (1.0 - lam) * terror_ll
     vals = DualLossValues(
         obj_err=float(obj_err.detach()),

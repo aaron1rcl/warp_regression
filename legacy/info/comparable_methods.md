@@ -77,7 +77,7 @@ A Gaussian process places a prior over functions through a mean and a covariance
 
 ### Overlap and divergence
 
-Shared instinct: change the time coordinate, then use a simpler model. GPs win on irregular timestamps and nonparametric flexibility. For this repo’s checklist they miss generative path uncertainty ($\sigma_t$, Brownian-bridge terror, cycle-length Monte Carlo) unless you leave “packaged” territory. Notebooks [`5`](../../examples/notebooks/5_Gaussian_Process_Equivalent.ipynb)–[`6`](../../examples/notebooks/6_Lynx_GP_Comparison.ipynb) probe the off-the-shelf versions of this idea.
+Shared instinct: change the time coordinate, then use a simpler model. GPs win on irregular timestamps and nonparametric flexibility. For this repo’s checklist they miss generative path uncertainty ($\sigma_t$, Brownian-bridge terror, cycle-length Monte Carlo) unless you leave “packaged” territory. Notebooks [`6`](../../examples/notebooks/6_Gaussian_Process_Equivalent.ipynb)–[`7`](../../examples/notebooks/7_Lynx_GP_Comparison.ipynb) probe the off-the-shelf versions of this idea.
 
 ### Tooling
 
