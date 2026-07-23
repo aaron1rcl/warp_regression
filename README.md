@@ -18,7 +18,7 @@ $$
 \hat{y}_i = f\big(\mathrm{warp}(x, p)_i\big),
 $$
 
-where $x$ is a covariate (often a sine or other known shape), $p$ is a low-dimensional warp path (fractional indices into $x$), and $f$ is linear, an MLP, trend + cycle, …. Soft-warp interpolates $x$ at those indices so $p$ is differentiable.
+where $x$ is a covariate (often a sine or other known shape), $p$ is a low-dimensional warp path (fractional indices into $x$), and $f$ is linear, an MLP, trend + cycle, …. **Soft-warp** here means ordinary differentiable linear interpolation of $x$ at those indices (standard technique — same family as spatial transformers / `grid_sample`; not invented in this package). What *is* specific here is scoring the path with a generative **terror** likelihood and fitting it jointly with the observation model.
 
 ### Terror (timing error)
 
